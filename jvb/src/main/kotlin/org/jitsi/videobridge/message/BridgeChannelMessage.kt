@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "colibriClass")
 @JsonSubTypes(
+    JsonSubTypes.Type(value = DisableRecvVideoEndpointsMessage::class, name = DisableRecvVideoEndpointsMessage.TYPE),
     JsonSubTypes.Type(value = SelectedEndpointsMessage::class, name = SelectedEndpointsMessage.TYPE),
     JsonSubTypes.Type(value = SelectedEndpointMessage::class, name = SelectedEndpointMessage.TYPE),
     JsonSubTypes.Type(value = PinnedEndpointsMessage::class, name = PinnedEndpointsMessage.TYPE),
@@ -89,6 +90,7 @@ open class MessageHandler {
         receivedCounts.computeIfAbsent(message::class.java.simpleName) { AtomicLong() }.incrementAndGet()
 
         return when (message) {
+            is DisableRecvVideoEndpointsMessage -> disableRecvVideoEndpoints(message)
             is SelectedEndpointsMessage -> selectedEndpoints(message)
             is SelectedEndpointMessage -> selectedEndpoint(message)
             is PinnedEndpointsMessage -> pinnedEndpoints(message)
@@ -114,6 +116,7 @@ open class MessageHandler {
         return null
     }
 
+    open fun disableRecvVideoEndpoints(message: DisableRecvVideoEndpointsMessage) = unhandledMessageReturnNull(message)
     open fun selectedEndpoints(message: SelectedEndpointsMessage) = unhandledMessageReturnNull(message)
     open fun selectedEndpoint(message: SelectedEndpointMessage) = unhandledMessageReturnNull(message)
     open fun pinnedEndpoints(message: PinnedEndpointsMessage) = unhandledMessageReturnNull(message)
@@ -132,6 +135,16 @@ open class MessageHandler {
     open fun removeReceiver(message: RemoveReceiverMessage) = unhandledMessageReturnNull(message)
 
     fun getReceivedCounts() = receivedCounts.mapValues { it.value.get() }
+}
+
+/**
+ * A message sent from a client to a bridge, indicating that the list of endpoints in the viewport changed.
+ */
+class DisableRecvVideoEndpointsMessage(val disableRecvVideoEndpoints: List<String>) : BridgeChannelMessage(TYPE) {
+
+    companion object {
+        const val TYPE = "DisableRecvVideoEndpointsChangedEvent"
+    }
 }
 
 /**

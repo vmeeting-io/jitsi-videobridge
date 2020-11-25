@@ -432,6 +432,23 @@ class EndpointMessageTransport
     }
 
     /**
+     * Notifies this {@code Endpoint} that a {@link DisableRecvVideoEndpointsMessage}
+     * has been received.
+     *
+     * @param message the message that was received.
+     */
+    @Override
+    public BridgeChannelMessage disableRecvVideoEndpoints(DisableRecvVideoEndpointsMessage message)
+    {
+        Set<String> newDisableRecvedVideoEndpoints = new HashSet<>(message.getDisableRecvVideoEndpoints());
+
+        logger.debug(() -> "disableRecvVideoEndpoints " + newDisableRecvedVideoEndpoints);
+        videoConstraintsCompatibility.setDisableRecvedVideoEndpoints(newDisableRecvedVideoEndpoints);
+        setSenderVideoConstraints(videoConstraintsCompatibility.computeVideoConstraints());
+        return null;
+    }
+
+    /**
      * Notifies this {@code Endpoint} that a {@link SelectedEndpointsMessage}
      * has been received.
      *

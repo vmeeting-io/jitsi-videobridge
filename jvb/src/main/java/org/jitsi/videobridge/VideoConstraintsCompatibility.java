@@ -43,6 +43,12 @@ class VideoConstraintsCompatibility
     private Set<String> selectedEndpoints = Collections.emptySet();
 
     /**
+     * The last video endpoints to not receive video set signaled by the receiving endpoint.
+     */
+    @NotNull
+    private Set<String> disableRecvVideoEndpoints = Collections.emptySet();
+
+    /**
      * The last max resolution signaled by the receiving endpoint. We set a
      * very large initial value because we want this to be ignored when we take
      * the Math.min below, unless the client has set it to a lower, more
@@ -170,6 +176,20 @@ class VideoConstraintsCompatibility
             newVideoConstraints.putAll(selectedVideoConstraintsMap);
         }
 
+        Set<String> disableRecvVideoEndpointsCopy = disableRecvVideoEndpoints;
+        if (!disableRecvVideoEndpointsCopy.isEmpty())
+        {
+            final VideoConstraints disableRecvVideoEndpointConstraints
+                = VideoConstraints.disabledVideoConstraints;
+
+            Map<String, VideoConstraints> disableRecvVideoConstraintsMap
+                = disableRecvVideoEndpointsCopy
+                .stream()
+                .collect(Collectors.toMap(e -> e, e -> disableRecvVideoEndpointConstraints));
+
+            newVideoConstraints.putAll(disableRecvVideoConstraintsMap);
+        }
+
         return newVideoConstraints;
     }
 
@@ -204,6 +224,17 @@ class VideoConstraintsCompatibility
     public void setSelectedEndpoints(@NotNull Set<String> newSelectedEndpoints)
     {
         this.selectedEndpoints = newSelectedEndpoints;
+    }
+
+    /**
+     * Sets the endpoints with video disableRecv signaled by the receiving endpoint.
+     *
+     * @param newDisableRecvVideoEndpoints the endpoints with video disableRecv signaled by the
+     * receiving endpoint.
+     */
+    public void setDisableRecvedVideoEndpoints(@NotNull Set<String> newDisableRecvVideoEndpoints)
+    {
+        this.disableRecvVideoEndpoints = newDisableRecvVideoEndpoints;
     }
 
     @SuppressWarnings("unchecked")
