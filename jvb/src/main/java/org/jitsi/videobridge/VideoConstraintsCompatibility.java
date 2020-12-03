@@ -108,21 +108,6 @@ class VideoConstraintsCompatibility
 
         int maxFrameHeightCopy = maxFrameHeight;
 
-        Set<String> pinnedEndpointsCopy = pinnedEndpoints;
-        if (!pinnedEndpointsCopy.isEmpty())
-        {
-            final VideoConstraints pinnedEndpointConstraints
-                = new VideoConstraints(Math.min(
-                BitrateControllerConfig.thumbnailMaxHeightPx(), maxFrameHeightCopy));
-
-            Map<String, VideoConstraints> pinnedVideoConstraintsMap
-                = pinnedEndpointsCopy
-                .stream()
-                .collect(Collectors.toMap(e -> e, e -> pinnedEndpointConstraints));
-
-            newVideoConstraints.putAll(pinnedVideoConstraintsMap);
-        }
-
         Set<String> selectedEndpointsCopy = selectedEndpoints;
         if (!selectedEndpointsCopy.isEmpty())
         {
@@ -179,6 +164,12 @@ class VideoConstraintsCompatibility
         Set<String> disableRecvVideoEndpointsCopy = disableRecvVideoEndpoints;
         if (!disableRecvVideoEndpointsCopy.isEmpty())
         {
+            // do not disable sending the video stream if in large video view
+            if (selectedEndpointsCopy.size() == 1)
+            {
+                disableRecvVideoEndpointsCopy.removeAll(selectedEndpointsCopy);
+            }
+
             final VideoConstraints disableRecvVideoEndpointConstraints
                 = VideoConstraints.disabledVideoConstraints;
 
@@ -188,6 +179,21 @@ class VideoConstraintsCompatibility
                 .collect(Collectors.toMap(e -> e, e -> disableRecvVideoEndpointConstraints));
 
             newVideoConstraints.putAll(disableRecvVideoConstraintsMap);
+        }
+
+        Set<String> pinnedEndpointsCopy = pinnedEndpoints;
+        if (!pinnedEndpointsCopy.isEmpty())
+        {
+            final VideoConstraints pinnedEndpointConstraints
+                = new VideoConstraints(Math.min(
+                BitrateControllerConfig.thumbnailMaxHeightPx(), maxFrameHeightCopy));
+
+            Map<String, VideoConstraints> pinnedVideoConstraintsMap
+                = pinnedEndpointsCopy
+                .stream()
+                .collect(Collectors.toMap(e -> e, e -> pinnedEndpointConstraints));
+
+            newVideoConstraints.putAll(pinnedVideoConstraintsMap);
         }
 
         return newVideoConstraints;
