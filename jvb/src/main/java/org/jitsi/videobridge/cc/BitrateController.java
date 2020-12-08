@@ -1095,7 +1095,7 @@ public class BitrateController
             AbstractEndpoint endpoint = conferenceEndpoints.get(i);
 
             VideoConstraints effectiveVideoConstraints = (i < adjustedLastN || adjustedLastN < 0)
-                ? videoConstraintsMap.getOrDefault(endpoint.getID(), VideoConstraints.thumbnailVideoConstraints)
+                ? videoConstraintsMap.getOrDefault(endpoint.getID(), VideoConstraints.disabledVideoConstraints)
                 : VideoConstraints.disabledVideoConstraints;
 
             endpointMultiRankList.add(new EndpointMultiRank(i, effectiveVideoConstraints, endpoint));
@@ -1408,7 +1408,7 @@ public class BitrateController
                     ratedPreferredIdx = ratesList.size() - 1;
                 }
             }
-            
+
             this.idealBitrate = idealBps;
 
             if (timeSeriesLogger.isTraceEnabled())
