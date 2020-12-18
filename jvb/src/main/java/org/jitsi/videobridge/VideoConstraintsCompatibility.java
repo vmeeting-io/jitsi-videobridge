@@ -107,24 +107,6 @@ class VideoConstraintsCompatibility
         Map<String, VideoConstraints> newVideoConstraints = new HashMap<>();
         int maxFrameHeightCopy = maxFrameHeight;
 
-        Set<String> recvVideoEndpointsCopy = recvVideoEndpoints;
-        if (!recvVideoEndpointsCopy.isEmpty())
-        {
-            // In tile view we set the ideal height but not the preferred height
-            // nor the preferred frame-rate because we want even even
-            // distribution of bandwidth among all the tiles to avoid ninjas.
-            final VideoConstraints tileViewConstraints = new VideoConstraints(
-                Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
-                    maxFrameHeightCopy));
-
-            Map<String, VideoConstraints> recvVideoEndpointsConstraintsMap
-                = recvVideoEndpointsCopy
-                .stream()
-                .collect(Collectors.toMap(e -> e, e -> tileViewConstraints));
-
-            newVideoConstraints.putAll(recvVideoEndpointsConstraintsMap);
-        }
-
         Set<String> selectedEndpointsCopy = selectedEndpoints;
         // This implements special handling for tile-view. We can show that
         // (selectedEndpoints.size() > 1) is equivalent to tile-view (so we
@@ -144,7 +126,32 @@ class VideoConstraintsCompatibility
         //
         // This means that the condition selectedEndpoints.size() > 1 is
         // equivalent to tile-view.
-        if ((!selectedEndpointsCopy.isEmpty()) && selectedEndpointsCopy.size() == 1)
+        boolean inLargeView = (selectedEndpointsCopy.size() == 1);
+
+        Set<String> recvVideoEndpointsCopy = recvVideoEndpoints;
+        if (!recvVideoEndpointsCopy.isEmpty())
+        {
+            // In tile view we set the ideal height but not the preferred height
+            // nor the preferred frame-rate because we want even even
+            // distribution of bandwidth among all the tiles to avoid ninjas.
+            final VideoConstraints tileViewConstraints = inLargeView? new VideoConstraints(
+                Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
+                    maxFrameHeightCopy)) : VideoConstraints.thumbnailVideoConstraints;
+
+            // If in large views, the filmstrip should have thumbnailVideoConstraints
+            final VideoConstraints viewConstraints = inLargeView?
+                    VideoConstraints.thumbnailVideoConstraints : tileViewConstraints;
+
+            Map<String, VideoConstraints> recvVideoEndpointsConstraintsMap
+                = recvVideoEndpointsCopy
+                .stream()
+                .collect(Collectors.toMap(e -> e, e -> viewConstraints));
+
+            newVideoConstraints.putAll(recvVideoEndpointsConstraintsMap);
+        }
+
+        // Set video constraint for video in large view
+        if (inLargeView)
         {
             final VideoConstraints selectedEndpointConstraints = new VideoConstraints(
                 Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
