@@ -134,9 +134,9 @@ class VideoConstraintsCompatibility
             // In tile view we set the ideal height but not the preferred height
             // nor the preferred frame-rate because we want even even
             // distribution of bandwidth among all the tiles to avoid ninjas.
-            final VideoConstraints tileViewConstraints = inLargeView? new VideoConstraints(
+            final VideoConstraints tileViewConstraints = new VideoConstraints(
                 Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
-                    maxFrameHeightCopy)) : VideoConstraints.thumbnailVideoConstraints;
+                    maxFrameHeightCopy));
 
             // If in large views, the filmstrip should have thumbnailVideoConstraints
             final VideoConstraints viewConstraints = inLargeView?
