@@ -60,6 +60,7 @@
     </build>
 
     <modules>
+        <module>jitsi-media-transform</module>
         <module>jvb-api</module>
         <module>jvb</module>
     </modules>
@@ -100,11 +101,6 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>rtp</artifactId>
                 <version>1.0-54-ge0d663c</version>
-            </dependency>
-            <dependency>
-                <groupId>${project.groupId}</groupId>
-                <artifactId>jitsi-media-transform</artifactId>
-                <version>1.0-198-g1babb83</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
