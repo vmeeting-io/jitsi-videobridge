@@ -1,3 +1,3 @@
 [submodule "jitsi-media-transform"]
 	path = jitsi-media-transform
-	url = git@github.com:vmeeting-io/jitsi-media-transform.git
+	url = git@github.com:vmeeting-io/jitsi-media-transform
