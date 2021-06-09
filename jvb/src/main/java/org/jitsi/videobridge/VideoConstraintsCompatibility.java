@@ -43,12 +43,6 @@ class VideoConstraintsCompatibility
     private Set<String> selectedEndpoints = Collections.emptySet();
 
     /**
-     * The last endpoints to receive video set signaled by the receiving endpoint.
-     */
-    @NotNull
-    private Set<String> recvVideoEndpoints = Collections.emptySet();
-
-    /**
      * The last max resolution signaled by the receiving endpoint. We set a
      * very large initial value because we want this to be ignored when we take
      * the Math.min below, unless the client has set it to a lower, more
@@ -105,70 +99,8 @@ class VideoConstraintsCompatibility
     Map<String, VideoConstraints> computeVideoConstraints()
     {
         Map<String, VideoConstraints> newVideoConstraints = new HashMap<>();
+
         int maxFrameHeightCopy = maxFrameHeight;
-
-        Set<String> selectedEndpointsCopy = selectedEndpoints;
-        // This implements special handling for tile-view. We can show that
-        // (selectedEndpoints.size() > 1) is equivalent to tile-view (so we
-        // can use it as a clue to detect tile-view):
-        //
-        // (selectedEndpoints.size() > 1) implies tile-view because multiple
-        // "selected" endpoints has only ever been used for tile-view.
-        //
-        // tile-view implies (selectedEndpoints.size() > 1), or, equivalently,
-        // (selectedEndpoints.size() <= 1) implies non tile-view because as
-        // soon as we click on a participant we exit tile-view, see:
-        //
-        // https://github.com/jitsi/jitsi-meet/commit/ebcde745ef34bd3d45a2d884825fdc48cfa16839
-        // https://github.com/jitsi/jitsi-meet/commit/4cea7018f536891b028784e7495f71fc99fc18a0
-        // https://github.com/jitsi/jitsi-meet/commit/29bc18df01c82cefbbc7b78f5aef7b97c2dee0e4
-        // https://github.com/jitsi/jitsi-meet/commit/e63cd8c81bceb9763e4d57be5f2262c6347afc23
-        //
-        // This means that the condition selectedEndpoints.size() > 1 is
-        // equivalent to tile-view.
-        boolean inLargeView = (selectedEndpointsCopy.size() == 1);
-
-        Set<String> recvVideoEndpointsCopy = recvVideoEndpoints;
-        if (!recvVideoEndpointsCopy.isEmpty())
-        {
-            // In tile view we set the ideal height but not the preferred height
-            // nor the preferred frame-rate because we want even even
-            // distribution of bandwidth among all the tiles to avoid ninjas.
-            final VideoConstraints tileViewConstraints = new VideoConstraints(
-                Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
-                    maxFrameHeightCopy));
-
-            // If in large views, the filmstrip should have thumbnailVideoConstraints
-            final VideoConstraints viewConstraints = inLargeView?
-                    VideoConstraints.thumbnailVideoConstraints : tileViewConstraints;
-
-            Map<String, VideoConstraints> recvVideoEndpointsConstraintsMap
-                = recvVideoEndpointsCopy
-                .stream()
-                .collect(Collectors.toMap(e -> e, e -> viewConstraints));
-
-            newVideoConstraints.putAll(recvVideoEndpointsConstraintsMap);
-        }
-
-        // Set video constraint for video in large view
-        if (inLargeView)
-        {
-            final VideoConstraints selectedEndpointConstraints = new VideoConstraints(
-                Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
-                    maxFrameHeightCopy),
-                BitrateControllerConfig.onstagePreferredHeightPx(),
-                BitrateControllerConfig.onstagePreferredFramerate());
-
-            Map<String, VideoConstraints> selectedVideoConstraintsMap
-                = selectedEndpointsCopy
-                .stream()
-                .collect(Collectors.toMap(e -> e, e -> selectedEndpointConstraints));
-
-            // Add video constraints for all the selected endpoints (which will
-            // automatically override the video constraints for pinned endpoints, so
-            // they're bumped to 720p if they're also selected).
-            newVideoConstraints.putAll(selectedVideoConstraintsMap);
-        }
 
         Set<String> pinnedEndpointsCopy = pinnedEndpoints;
         if (!pinnedEndpointsCopy.isEmpty())
@@ -183,6 +115,59 @@ class VideoConstraintsCompatibility
                 .collect(Collectors.toMap(e -> e, e -> pinnedEndpointConstraints));
 
             newVideoConstraints.putAll(pinnedVideoConstraintsMap);
+        }
+
+        Set<String> selectedEndpointsCopy = selectedEndpoints;
+        if (!selectedEndpointsCopy.isEmpty())
+        {
+            final VideoConstraints selectedEndpointConstraints;
+
+            if (selectedEndpointsCopy.size() > 1)
+            {
+                // This implements special handling for tile-view. We can show that
+                // (selectedEndpoints.size() > 1) is equivalent to tile-view (so we
+                // can use it as a clue to detect tile-view):
+                //
+                // (selectedEndpoints.size() > 1) implies tile-view because multiple
+                // "selected" endpoints has only ever been used for tile-view.
+                //
+                // tile-view implies (selectedEndpoints.size() > 1), or, equivalently,
+                // (selectedEndpoints.size() <= 1) implies non tile-view because as
+                // soon as we click on a participant we exit tile-view, see:
+                //
+                // https://github.com/jitsi/jitsi-meet/commit/ebcde745ef34bd3d45a2d884825fdc48cfa16839
+                // https://github.com/jitsi/jitsi-meet/commit/4cea7018f536891b028784e7495f71fc99fc18a0
+                // https://github.com/jitsi/jitsi-meet/commit/29bc18df01c82cefbbc7b78f5aef7b97c2dee0e4
+                // https://github.com/jitsi/jitsi-meet/commit/e63cd8c81bceb9763e4d57be5f2262c6347afc23
+                //
+                // This means that the condition selectedEndpoints.size() > 1 is
+                // equivalent to tile-view.
+
+                // In tile view we set the ideal height but not the preferred height
+                // nor the preferred frame-rate because we want even even
+                // distribution of bandwidth among all the tiles to avoid ninjas.
+                selectedEndpointConstraints = new VideoConstraints(
+                    Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
+                        maxFrameHeightCopy));
+            }
+            else
+            {
+                selectedEndpointConstraints = new VideoConstraints(
+                    Math.min(BitrateControllerConfig.onstageIdealHeightPx(),
+                        maxFrameHeightCopy),
+                    BitrateControllerConfig.onstagePreferredHeightPx(),
+                    BitrateControllerConfig.onstagePreferredFramerate());
+            }
+
+            Map<String, VideoConstraints> selectedVideoConstraintsMap
+                = selectedEndpointsCopy
+                .stream()
+                .collect(Collectors.toMap(e -> e, e -> selectedEndpointConstraints));
+
+            // Add video constraints for all the selected endpoints (which will
+            // automatically override the video constraints for pinned endpoints, so
+            // they're bumped to 720p if they're also selected).
+            newVideoConstraints.putAll(selectedVideoConstraintsMap);
         }
 
         return newVideoConstraints;
@@ -219,18 +204,6 @@ class VideoConstraintsCompatibility
     public void setSelectedEndpoints(@NotNull Set<String> newSelectedEndpoints)
     {
         this.selectedEndpoints = newSelectedEndpoints;
-    }
-
-    /**
-     * Sets the endpoints to recv video signaled by the receiving endpoint.
-     * Note that large and pinned video has higer priority and are always sent
-     *
-     * @param newRecvVideoEndpoints the endpoints to recv video signaled by the
-     * receiving endpoint.
-     */
-    public void setRecvVideoEndpoints(@NotNull Set<String> newRecvVideoEndpoints)
-    {
-        this.recvVideoEndpoints = newRecvVideoEndpoints;
     }
 
     @SuppressWarnings("unchecked")

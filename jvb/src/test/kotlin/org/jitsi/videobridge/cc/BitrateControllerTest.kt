@@ -42,10 +42,10 @@ class BitrateControllerTest : FunSpec({
         }.toMap().shouldContainExactly((
             mapOf(
                 "endpoint-1" to VideoConstraints(720),
-                "endpoint-2" to VideoConstraints.disabledVideoConstraints,
-                "endpoint-3" to VideoConstraints.disabledVideoConstraints,
-                "endpoint-4" to VideoConstraints.disabledVideoConstraints,
-                "endpoint-5" to VideoConstraints.disabledVideoConstraints
+                "endpoint-2" to VideoConstraints.thumbnailVideoConstraints,
+                "endpoint-3" to VideoConstraints.thumbnailVideoConstraints,
+                "endpoint-4" to VideoConstraints.thumbnailVideoConstraints,
+                "endpoint-5" to VideoConstraints.thumbnailVideoConstraints
         )))
     }
 
@@ -64,9 +64,9 @@ class BitrateControllerTest : FunSpec({
             it.endpoint.id to it.effectiveVideoConstraints
         }.toMap().shouldContainExactly((
             mapOf(
-                "endpoint-1" to VideoConstraints.disabledVideoConstraints,
-                "endpoint-2" to VideoConstraints.disabledVideoConstraints,
-                "endpoint-3" to VideoConstraints.disabledVideoConstraints,
+                "endpoint-1" to VideoConstraints.thumbnailVideoConstraints,
+                "endpoint-2" to VideoConstraints.thumbnailVideoConstraints,
+                "endpoint-3" to VideoConstraints.thumbnailVideoConstraints,
                 "endpoint-4" to VideoConstraints.disabledVideoConstraints,
                 "endpoint-5" to VideoConstraints.disabledVideoConstraints
         )))
