@@ -275,7 +275,7 @@ public class VideobridgeStatistics
             }
 
             updateBuckets(conferenceSizes, numConferenceEndpoints);
-            endpoints += numConferenceEndpoints;
+            endpoints += numLocalEndpoints;
             octoEndpoints += (numConferenceEndpoints - numLocalEndpoints);
 
             int conferenceAudioSenders = 0;
