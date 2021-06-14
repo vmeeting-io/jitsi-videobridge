@@ -322,6 +322,11 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
                 {
                     oversending |= sourceBitrateAllocation.tryLowestLayer();
                 }
+
+                // allocate at least the lowest layer to prevent the video to be turnoff due to insufficient bandwidth.
+                // mitigate the overload by setting the constraints to min of 180p/1fps
+                oversending |= sourceBitrateAllocation.tryLowestLayer();
+
                 maxBandwidth -= sourceBitrateAllocation.getTargetBitrate();
 
                 newTargetIndices[i] = sourceBitrateAllocation.targetIdx;
