@@ -3,7 +3,7 @@
     <option name="ALTERNATIVE_JRE_PATH" value="1.8" />
     <option name="ALTERNATIVE_JRE_PATH_ENABLED" value="true" />
     <option name="MAIN_CLASS_NAME" value="org.jitsi.videobridge.MainKt" />
-    <module name="jitsi-videobridge" />
+    <module name="jitsi-videobridge (1)" />
     <option name="PROGRAM_PARAMETERS" value="--apis=rest,colibri" />
     <option name="VM_PARAMETERS" value=" -Dnet.java.sip.communicator.SC_HOME_DIR_LOCATION=/ -Dnet.java.sip.communicator.SC_HOME_DIR_NAME=config -Djava.util.logging.config.file=/config/logging.properties -Dconfig.file=/config/jvb.conf" />
     <method v="2">
