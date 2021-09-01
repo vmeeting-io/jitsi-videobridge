@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2021-Present 8x8, Inc
+ * Copyright @ 2021 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,11 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.videobridge.util
+package org.jitsi.videobridge
 
-enum class VideoType {
-    CAMERA,
-    DESKTOP,
-    DESKTOP_HIGH_FPS,
-    NONE
+import org.jitsi.config.JitsiConfig
+import org.jitsi.metaconfig.config
+
+class ConferenceSpeechActivityConfig {
+    val recentSpeakersCount: Int by config {
+        "videobridge.speech-activity.recent-speakers-count".from(JitsiConfig.newConfig)
+    }
+
+    companion object {
+        @JvmStatic
+        val config = ConferenceSpeechActivityConfig()
+    }
 }

@@ -35,7 +35,6 @@ import org.jitsi.nlj.transform.node.ConsumerNode
 import org.jitsi.nlj.util.Bandwidth
 import org.jitsi.nlj.util.LocalSsrcAssociation
 import org.jitsi.nlj.util.NEVER
-import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.nlj.util.PacketInfoQueue
 import org.jitsi.nlj.util.RemoteSsrcAssociation
 import org.jitsi.rtp.Packet
@@ -47,6 +46,7 @@ import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbFirPacket
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbPliPacket
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi.utils.MediaType
+import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.utils.concurrent.RecurringRunnableExecutor
 import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.cdebug
@@ -281,7 +281,7 @@ class Endpoint @JvmOverloads constructor(
         private set(value) {
             val wasEmpty = transceiver.getMediaSources().isEmpty()
             if (transceiver.setMediaSources(value)) {
-                eventEmitter.fireEventSync { sourcesChanged() }
+                eventEmitter.fireEvent { sourcesChanged() }
             }
             if (wasEmpty) {
                 sendVideoConstraints(maxReceiverVideoConstraints)
@@ -318,7 +318,7 @@ class Endpoint @JvmOverloads constructor(
         iceTransport.eventHandler = object : IceTransport.EventHandler {
             override fun connected() {
                 logger.info("ICE connected")
-                eventEmitter.fireEventSync { iceSucceeded() }
+                eventEmitter.fireEvent { iceSucceeded() }
                 transceiver.setOutgoingPacketHandler(object : PacketHandler {
                     override fun processPacket(packetInfo: PacketInfo) {
                         outgoingSrtpPacketQueue.add(packetInfo)
@@ -329,7 +329,7 @@ class Endpoint @JvmOverloads constructor(
             }
 
             override fun failed() {
-                eventEmitter.fireEventSync { iceFailed() }
+                eventEmitter.fireEvent { iceFailed() }
             }
 
             override fun consentUpdated(time: Instant) {
@@ -438,7 +438,7 @@ class Endpoint @JvmOverloads constructor(
         }
 
         packetInfo.sent()
-        if (timelineLogger.isTraceEnabled() && logTimeline()) {
+        if (timelineLogger.isTraceEnabled && logTimeline()) {
             timelineLogger.trace { packetInfo.timeline.toString() }
         }
         iceTransport.send(packetInfo.packet.buffer, packetInfo.packet.offset, packetInfo.packet.length)
@@ -798,7 +798,7 @@ class Endpoint @JvmOverloads constructor(
     fun getMostRecentChannelCreatedTime(): Instant {
         return channelShims
             .map(ChannelShim::getCreationTimestamp)
-            .max() ?: NEVER
+            .maxOrNull() ?: NEVER
     }
 
     override fun receivesSsrc(ssrc: Long): Boolean = transceiver.receivesSsrc(ssrc)
@@ -862,7 +862,7 @@ class Endpoint @JvmOverloads constructor(
         val maxExpireTimeFromChannelShims = channelShims
             .map(ChannelShim::getExpire)
             .map { Duration.ofSeconds(it.toLong()) }
-            .max() ?: Duration.ZERO
+            .maxOrNull() ?: Duration.ZERO
 
         val lastActivity = lastIncomingActivity
         val now = clock.instant()
@@ -932,10 +932,14 @@ class Endpoint @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Determine whether to forward endpoint stats from another endpoint to this one.
+     */
     fun wantsStatsFrom(ep: AbstractEndpoint): Boolean {
         return conference.speechActivity.isRecentSpeaker(ep) ||
+            conference.isRankedSpeaker(ep) ||
             bitrateController.isOnStageOrSelected(ep) ||
-            bitrateController.isForwarding(ep)
+            bitrateController.hasNonZeroEffectiveConstraints(ep)
     }
 
     /**
@@ -954,6 +958,13 @@ class Endpoint @JvmOverloads constructor(
             totalPacketsReceived.addAndGet(incomingStats.packets)
             totalBytesSent.addAndGet(outgoingStats.bytes)
             totalPacketsSent.addAndGet(outgoingStats.packets)
+        }
+
+        conference.videobridge.statistics.apply {
+            val bweStats = transceiverStats.bandwidthEstimatorStats
+            bweStats.getNumber("incomingEstimateExpirations")?.toInt()?.let {
+                incomingBitrateExpirations.addAndGet(it)
+            }
         }
 
         run {

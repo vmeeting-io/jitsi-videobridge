@@ -94,6 +94,13 @@ public class VideobridgeStatistics
     public static final String OUTGOING_LOSS = "outgoing_loss";
 
     /**
+     * The name of the stat that tracks the total number of times our AIMDs have
+     * expired the incoming bitrate (and which would otherwise result in video
+     * suspension).
+     */
+    private static final String TOTAL_AIMD_BWE_EXPIRATIONS = "total_aimd_bwe_expirations";
+
+    /**
      * Fraction of incoming and outgoing packets that were lost.
      */
     public static final String OVERALL_LOSS = "overall_loss";
@@ -311,7 +318,7 @@ public class VideobridgeStatistics
                 TransceiverStats transceiverStats = endpoint.getTransceiver().getTransceiverStats();
                 IncomingStatisticsSnapshot incomingStats = transceiverStats.getIncomingStats();
                 PacketStreamStats.Snapshot incomingPacketStreamStats = transceiverStats.getIncomingPacketStreamStats();
-                bitrateDownloadBps += incomingPacketStreamStats.getBitrate();
+                bitrateDownloadBps += incomingPacketStreamStats.getBitrateBps();
                 packetRateDownload += incomingPacketStreamStats.getPacketRate();
                 for (IncomingSsrcStats.Snapshot ssrcStats : incomingStats.getSsrcStats().values())
                 {
@@ -326,7 +333,7 @@ public class VideobridgeStatistics
                 }
 
                 PacketStreamStats.Snapshot outgoingStats = transceiverStats.getOutgoingPacketStreamStats();
-                bitrateUploadBps += outgoingStats.getBitrate();
+                bitrateUploadBps += outgoingStats.getBitrateBps();
                 packetRateUpload += outgoingStats.getPacketRate();
 
                 EndpointConnectionStats.Snapshot endpointConnectionStats
@@ -439,6 +446,9 @@ public class VideobridgeStatistics
                     bitrateUploadBps / 1000 /* kbps */);
             unlockedSetStat(PACKET_RATE_DOWNLOAD, packetRateDownload);
             unlockedSetStat(PACKET_RATE_UPLOAD, packetRateUpload);
+            unlockedSetStat(
+                TOTAL_AIMD_BWE_EXPIRATIONS,
+                jvbStats.incomingBitrateExpirations.get());
             // TODO seems broken (I see values of > 11 seconds)
             unlockedSetStat(JITTER_AGGREGATE, jitterAggregate);
             unlockedSetStat(RTT_AGGREGATE, rttAggregate);
@@ -527,6 +537,7 @@ public class VideobridgeStatistics
             unlockedSetStat(
                     TOTAL_PACKETS_RECEIVED, jvbStats.totalPacketsReceived.get());
             unlockedSetStat(TOTAL_PACKETS_SENT, jvbStats.totalPacketsSent.get());
+            unlockedSetStat("tossedPacketsEnergy", jvbStats.tossedPacketsEnergy.toJson());
 
             OctoRelayService.Stats octoRelayServiceStats
                 = octoRelayService == null ? null : octoRelayService.getStats();

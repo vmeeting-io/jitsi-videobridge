@@ -37,6 +37,7 @@ import org.jitsi.xmpp.extensions.jingle.CandidatePacketExtension
 import org.jitsi.xmpp.extensions.jingle.IceUdpTransportPacketExtension
 import org.jitsi.xmpp.extensions.jingle.RtcpmuxPacketExtension
 import java.beans.PropertyChangeEvent
+import java.beans.PropertyChangeListener
 import java.io.IOException
 import java.net.DatagramPacket
 import java.time.Clock
@@ -96,19 +97,22 @@ class IceTransport @JvmOverloads constructor(
      */
     private val running = AtomicBoolean(true)
 
+    private val iceStateChangeListener = PropertyChangeListener { ev -> iceStateChanged(ev) }
+    private val iceStreamPairChangedListener = PropertyChangeListener { ev -> iceStreamPairChanged(ev) }
+
     private val iceAgent = Agent(IceConfig.config.ufragPrefix, logger).apply {
         appendHarvesters(this)
         isControlling = controlling
         performConsentFreshness = true
         nominationStrategy = IceConfig.config.nominationStrategy
-        addStateChangeListener(this@IceTransport::iceStateChanged)
+        addStateChangeListener(iceStateChangeListener)
     }.also {
         logger.addContext("local_ufrag", it.localUfrag)
     }
 
     // TODO: Do we still need the id here now that we have logContext?
     private val iceStream = iceAgent.createMediaStream("stream-$id").apply {
-        addPairChangeListener(this@IceTransport::iceStreamPairChanged)
+        addPairChangeListener(iceStreamPairChangedListener)
     }
 
     private val iceComponent = iceAgent.createComponent(
@@ -235,8 +239,8 @@ class IceTransport @JvmOverloads constructor(
     fun stop() {
         if (running.compareAndSet(true, false)) {
             logger.info("Stopping")
-            iceAgent.removeStateChangeListener(this::iceStateChanged)
-            iceStream.removePairStateChangeListener(this::iceStreamPairChanged)
+            iceAgent.removeStateChangeListener(iceStateChangeListener)
+            iceStream.removePairStateChangeListener(iceStreamPairChangedListener)
             iceAgent.free()
         }
     }

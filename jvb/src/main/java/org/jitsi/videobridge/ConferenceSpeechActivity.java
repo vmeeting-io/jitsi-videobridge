@@ -38,7 +38,7 @@ public class ConferenceSpeechActivity
     /**
      * The number of speakers to consider "recent".
      */
-    public static final int NUM_RECENT_SPEAKERS = 10;
+    public final int numRecentSpeakers = ConferenceSpeechActivityConfig.getConfig().getRecentSpeakersCount();
 
     /**
      * The <tt>Logger</tt> used by the <tt>ConferenceSpeechActivity</tt> class
@@ -103,6 +103,11 @@ public class ConferenceSpeechActivity
                         parentLogger.createChildLogger(ConferenceSpeechActivity.class.getName());
 
         dominantSpeakerIdentification.addActiveSpeakerChangedListener(activeSpeakerChangedListener);
+        int numLoudestToTrack = LoudestConfig.Companion.getRouteLoudestOnly() ?
+                LoudestConfig.Companion.getNumLoudest() : 0;
+        dominantSpeakerIdentification.setLoudestConfig(numLoudestToTrack,
+                (int)(LoudestConfig.Companion.getEnergyExpireTime().toMillis()),
+                LoudestConfig.Companion.getEnergyAlphaPct());
     }
 
     /**
@@ -221,7 +226,7 @@ public class ConferenceSpeechActivity
     /**
      * Get at most {@code limit} enties from the history of speakers skipping the first {@code skip}.
      */
-    public List<String> getSpeakerHistory(int skip, int limit)
+    private List<String> getSpeakerHistory(int skip, int limit)
     {
         synchronized (syncRoot)
         {
@@ -238,7 +243,7 @@ public class ConferenceSpeechActivity
      */
     public List<String> getRecentSpeakers()
     {
-        return getSpeakerHistory(1, NUM_RECENT_SPEAKERS);
+        return getSpeakerHistory(1, numRecentSpeakers);
     }
 
     /**
@@ -248,7 +253,7 @@ public class ConferenceSpeechActivity
     {
         Iterator<AbstractEndpoint> it = endpointsBySpeechActivity.iterator();
         int i = 0;
-        while (it.hasNext() && i <= NUM_RECENT_SPEAKERS + 1)
+        while (it.hasNext() && i <= numRecentSpeakers)
         {
             if (it.next() == endpoint)
             {
@@ -257,6 +262,11 @@ public class ConferenceSpeechActivity
             i++;
         }
         return false;
+    }
+
+    public DominantSpeakerIdentification<String>.SpeakerRanking getRanking(String endpointId)
+    {
+        return dominantSpeakerIdentification.getRanking(endpointId);
     }
 
     /**
@@ -324,6 +334,28 @@ public class ConferenceSpeechActivity
                 if (finalEndpointsChanged)
                 {
                     listener.lastNEndpointsChanged();
+                }
+            });
+        }
+    }
+
+    public void endpointVideoAvailabilityChanged()
+    {
+        boolean endpointsListChanged;
+        synchronized (syncRoot)
+        {
+            endpointsListChanged = updateLastNEndpoints();
+        }
+        if (endpointsListChanged)
+        {
+            TaskPools.IO_POOL.submit(() -> {
+                try
+                {
+                    listener.lastNEndpointsChanged();
+                }
+                catch (Throwable e)
+                {
+                    logger.warn("Failed to fire event", e);
                 }
             });
         }
