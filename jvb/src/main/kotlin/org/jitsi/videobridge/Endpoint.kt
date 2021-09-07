@@ -194,7 +194,7 @@ class Endpoint @JvmOverloads constructor(
         TransportConfig.queueSize
     )
 
-    private val bitrateController = BitrateController(
+    val bitrateController = BitrateController(
         object : BitrateController.EventHandler {
             override fun allocationChanged(allocation: BandwidthAllocation) {
                 // Intentional no-op

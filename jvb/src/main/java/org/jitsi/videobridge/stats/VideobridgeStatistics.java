@@ -15,11 +15,13 @@
  */
 package org.jitsi.videobridge.stats;
 
+import com.google.gson.JsonObject;
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.stats.*;
 import org.jitsi.nlj.transform.node.incoming.*;
 import org.jitsi.utils.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.cc.allocation.VideoConstraints;
 import org.jitsi.videobridge.load_management.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.octo.config.*;
@@ -104,6 +106,9 @@ public class VideobridgeStatistics
      * Fraction of incoming and outgoing packets that were lost.
      */
     public static final String OVERALL_LOSS = "overall_loss";
+
+    /* Stats required for RL module */
+    public static final String RL_STATS = "rl_stats";
 
     /**
      * The indicator which determines whether {@link #generate()} is executing
@@ -249,8 +254,13 @@ public class VideobridgeStatistics
         int endpointsWithHighOutgoingLoss = 0;
         int numLocalActiveEndpoints = 0;
 
+        JSONObject allStats = new JSONObject();
+
+
         for (Conference conference : videobridge.getConferences())
         {
+            JSONObject confStats = new JSONObject();
+
             ConferenceShim conferenceShim = conference.getShim();
             //TODO: can/should we do everything here via the shim only?
             conferences++;
@@ -297,6 +307,19 @@ public class VideobridgeStatistics
             }
             for (Endpoint endpoint : conference.getLocalEndpoints())
             {
+                JSONObject epStats = new JSONObject();
+
+                JSONObject videoConstraints = new JSONObject();
+                Map<String, VideoConstraints> videoConstraintsMap = endpoint
+                        .getBitrateController()
+                        .getAllocationSettings()
+                        .getVideoConstraints();
+                for(String epID : videoConstraintsMap.keySet()) {
+                    videoConstraints.put(epID, videoConstraintsMap.get(epID).getMaxHeight());
+                }
+                epStats.put("video_constraints", videoConstraints);
+
+
                 if (endpoint.isOversending())
                 {
                     numOversending++;
@@ -320,6 +343,9 @@ public class VideobridgeStatistics
                 PacketStreamStats.Snapshot incomingPacketStreamStats = transceiverStats.getIncomingPacketStreamStats();
                 bitrateDownloadBps += incomingPacketStreamStats.getBitrateBps();
                 packetRateDownload += incomingPacketStreamStats.getPacketRate();
+
+                double epJitterSumMs = 0;
+                int epJitterCount = 0;
                 for (IncomingSsrcStats.Snapshot ssrcStats : incomingStats.getSsrcStats().values())
                 {
                     double ssrcJitter = ssrcStats.getJitter();
@@ -327,10 +353,13 @@ public class VideobridgeStatistics
                     {
                         // We take the abs because otherwise the
                         // aggregate makes no sense.
-                        jitterSumMs += Math.abs(ssrcJitter);
-                        jitterCount++;
+                        epJitterSumMs += Math.abs(ssrcJitter);
+                        epJitterCount++;
                     }
                 }
+                jitterSumMs += epJitterSumMs;
+                jitterCount += epJitterCount;
+                epStats.put("jitter_ms", epJitterCount > 0 ? jitterSumMs/epJitterCount : 0);
 
                 PacketStreamStats.Snapshot outgoingStats = transceiverStats.getOutgoingPacketStreamStats();
                 bitrateUploadBps += outgoingStats.getBitrateBps();
@@ -344,6 +373,7 @@ public class VideobridgeStatistics
                     rttSumMs += endpointRtt;
                     rttCount++;
                 }
+                epStats.put("round_trip_time_ms", endpointRtt);
 
                 incomingPacketsReceived += endpointConnectionStats.getIncomingLossStats().getPacketsReceived();
                 incomingPacketsLost += endpointConnectionStats.getIncomingLossStats().getPacketsLost();
@@ -354,6 +384,9 @@ public class VideobridgeStatistics
                 outgoingPacketsReceived += endpointOutgoingPacketsReceived;
                 outgoingPacketsLost += endpointOutgoingPacketsLost;
 
+                epStats.put("pkt_lost", endpointConnectionStats.getOutgoingLossStats().getPacketsLost());
+                epStats.put("pkt_received", endpointConnectionStats.getOutgoingLossStats().getPacketsReceived());
+
                 if (!inactive && endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived > 0)
                 {
                     double endpointOutgoingFractionLost = ((double) endpointOutgoingPacketsLost)
@@ -363,12 +396,16 @@ public class VideobridgeStatistics
                         endpointsWithHighOutgoingLoss++;
                     }
                 }
+
+                confStats.put(endpoint.getId(), epStats);
             }
 
             updateBuckets(audioSendersBuckets, conferenceAudioSenders);
             numAudioSenders += conferenceAudioSenders;
             updateBuckets(videoSendersBuckets, conferenceVideoSenders);
             numVideoSenders += conferenceVideoSenders;
+
+            allStats.put(conference.getGid(), confStats);
         }
 
         // JITTER_AGGREGATE
@@ -607,6 +644,8 @@ public class VideobridgeStatistics
             unlockedSetStat(
                     MUCS_JOINED,
                     xmppConnection.getMucClientManager().getMucJoinedCount());
+            unlockedSetStat(RL_STATS, allStats);
+
         }
         finally
         {
