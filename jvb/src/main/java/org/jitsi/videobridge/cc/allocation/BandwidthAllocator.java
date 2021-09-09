@@ -128,6 +128,8 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
 
     private final DiagnosticContext diagnosticContext;
 
+    public List<SingleSourceAllocation> SSAs;
+
     BandwidthAllocator(
             EventHandler eventHandler,
             Supplier<List<T>> endpointsSupplier,
@@ -164,7 +166,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
     }
 
     @NotNull
-    BandwidthAllocation getAllocation()
+    public BandwidthAllocation getAllocation()
     {
         return allocation;
     }
@@ -172,7 +174,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
     /**
      * Get the available bandwidth, taking into account the `trustBwe` option.
      */
-    private long getAvailableBandwidth()
+    public long getAvailableBandwidth()
     {
         return trustBwe.get() ? bweBps : Long.MAX_VALUE;
     }
@@ -339,6 +341,14 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
             targetBps += sourceBitrateAllocation.getTargetBitrate();
             idealBps += sourceBitrateAllocation.getIdealBitrate();
         }
+        SSAs = sourceBitrateAllocations;
+
+//        Set<SingleAllocation> temp = sourceBitrateAllocations.stream().map(SingleSourceAllocation::getResult).collect(Collectors.toSet());
+//        int cnt = 1;
+//        for(SingleAllocation i : temp) {
+//            logger.info("##### (BA " + cnt++ + ") Endpoint : "+i.getEndpointId() +", TargetLayer : " + i.getTargetLayer().toString() +  ", IdealLayer : " +i.getIdealLayer().toString() + ", targetIdx : " + i.getTargetLayer().getIndex());
+//        }
+
         return new BandwidthAllocation(allocations, oversending, idealBps, targetBps);
     }
 
@@ -415,4 +425,28 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
                 @NotNull Map<String, VideoConstraints> oldEffectiveConstraints,
                 @NotNull Map<String, VideoConstraints> newEffectiveConstraints) {}
     }
+
+    public Map<String, Long> getTargetLayerBps() {
+        Map<String, Long> result = new HashMap<>();
+        for(SingleSourceAllocation ssa: SSAs) {
+            result.put(ssa.getEndpoint().getId(), ssa.getTargetBitrate());
+        }
+        return result;
+    }
+
+    public Map<String, List<LayerSnapshot>> getAllLayerBps() {
+        Map<String, List<LayerSnapshot>> result= new HashMap<String, List<LayerSnapshot>>();
+        for(SingleSourceAllocation ssa: SSAs) {
+            result.put(ssa.getEndpoint().getId(), ssa.getAllLayers());
+        }
+        return result;
+    }
+
+//    public Map<Integer, Long> getIdealLayerBps() {
+//        Map<Integer, Long> result = new HashMap<>();
+//        for(SingleSourceAllocation ssa: SSAs) {
+//            result.put(ssa.getTargetIdx(),ssa.getIdealBitrate());
+//        }
+//        return result;
+//    }
 }

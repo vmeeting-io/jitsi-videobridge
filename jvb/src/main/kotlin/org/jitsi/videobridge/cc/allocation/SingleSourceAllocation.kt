@@ -19,6 +19,8 @@ import org.jitsi.nlj.RtpLayerDesc
 import org.jitsi.nlj.RtpLayerDesc.Companion.indexString
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging.TimeSeriesLogger
+import org.jitsi.utils.logging2.LoggerImpl
+import org.jitsi.utils.logging2.createLogger
 import org.jitsi.videobridge.cc.config.BitrateControllerConfig
 import org.jitsi.videobridge.cc.config.BitrateControllerConfig.Companion.onstagePreferredFramerate
 import org.jitsi.videobridge.cc.config.BitrateControllerConfig.Companion.onstagePreferredHeightPx
@@ -41,10 +43,17 @@ internal class SingleSourceAllocation(
     diagnosticContext: DiagnosticContext,
     clock: Clock
 ) {
+
+    val logger = createLogger()
+
     /**
      * The immutable list of layers to be considered when allocating bandwidth.
      */
     val layers: Layers = selectLayers(endpoint, onStage, constraints, clock.instant().toEpochMilli())
+
+
+    val allLayers: List<LayerSnapshot> = allLayers(endpoint, clock.instant().toEpochMilli())
+
 
     /**
      * The index (into [layers] of the current target layer). It can be improved in the `improve()` step, if there is
@@ -64,6 +73,15 @@ internal class SingleSourceAllocation(
             }
             timeSeriesLogger.trace(ratesTimeSeriesPoint)
         }
+    }
+
+
+    fun getAllBitrates(): Map<Int, Double> {
+        var result: MutableMap<Int, Double> = mutableMapOf()
+        for(layer in this.layers) {
+            result.put(layer.layer.layerId, layer.bitrate)
+        }
+        return result
     }
 
     fun isOnStage() = onStage
@@ -267,6 +285,21 @@ private fun selectLayers(
         VideoType.DESKTOP, VideoType.DESKTOP_HIGH_FPS -> selectLayersForScreensharing(layers, constraints, onStage)
     }
 }
+
+fun allLayers(endpoint: MediaSourceContainer,
+               nowMs: Long
+): List<LayerSnapshot> {
+    val source = endpoint.mediaSource
+    if (source == null || !source.hasRtpLayers()) {
+        return Layers.noLayers
+    }
+    val layers = source.rtpLayers.map { LayerSnapshot(it, it.getBitrateBps(nowMs)) }
+    return layers
+}
+
+
+
+
 
 /**
  * Selects from a list of layers the ones which should be considered when allocating bandwidth, as well as the
