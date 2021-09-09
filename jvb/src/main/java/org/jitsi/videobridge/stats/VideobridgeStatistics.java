@@ -169,13 +169,7 @@ public class VideobridgeStatistics
         String tmp_timestamp = timestampFormat.format(new Date());
         unlockedSetStat(TIMESTAMP, tmp_timestamp);
 
-        logger.info("##### Before initialization ##### : "+ file);
-
         initFile(tmp_timestamp);
-
-        logger.info("##### After initialization ##### : "+ file);
-
-
     }
 
     public void initFile(String curTime) {
@@ -515,7 +509,7 @@ public class VideobridgeStatistics
         }
         timedAllStats.put(statIdx, allStats);
         statIdx++;
-        logger.info(timedAllStats.toJSONString());
+        //logger.info(timedAllStats.toJSONString());
 
         /* Save the stat info to a file */
         if(timedAllStats.size() != 0) {
