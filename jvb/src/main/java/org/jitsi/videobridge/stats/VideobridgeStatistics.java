@@ -507,12 +507,13 @@ public class VideobridgeStatistics
 
             allStats.put(conference.getGid(), confStats);
         }
+//        logger.info(allStats.toJSONString());
         timedAllStats.put(statIdx, allStats);
-        statIdx++;
-        //logger.info(timedAllStats.toJSONString());
 
         /* Save the stat info to a file */
-        if(timedAllStats.size() != 0) {
+        if(timedAllStats.toString().length() > 50) {
+            statIdx++;
+//            logger.info(timedAllStats.toJSONString());
             try {
                 FileWriter fw = new FileWriter(file, true);
                 fw.write(timedAllStats.toJSONString()+"\n");
@@ -759,6 +760,7 @@ public class VideobridgeStatistics
                     MUCS_JOINED,
                     xmppConnection.getMucClientManager().getMucJoinedCount());
             unlockedSetStat(RL_STATS, timedAllStats);
+//            unlockedSetStat(RL_STATS, allStats);
 
         }
         finally
