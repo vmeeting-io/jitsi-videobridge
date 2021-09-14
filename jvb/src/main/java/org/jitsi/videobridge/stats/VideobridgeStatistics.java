@@ -759,7 +759,7 @@ public class VideobridgeStatistics
             unlockedSetStat(
                     MUCS_JOINED,
                     xmppConnection.getMucClientManager().getMucJoinedCount());
-            unlockedSetStat(RL_STATS, timedAllStats);
+            // unlockedSetStat(RL_STATS, timedAllStats);
 //            unlockedSetStat(RL_STATS, allStats);
 
         }
