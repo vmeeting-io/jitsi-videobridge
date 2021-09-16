@@ -494,7 +494,8 @@ public class Conference
      */
     void expire()
     {
-        if (!expired.compareAndSet(false, true)) {
+        if (!expired.compareAndSet(false, true))
+        {
             return;
         }
 

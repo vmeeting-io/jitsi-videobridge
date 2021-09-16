@@ -99,7 +99,7 @@ public class ConferenceShim
                         request.getCallback().invoke(
                                 IQUtils.createError(
                                         request.getRequest(),
-                                        XMPPError.Condition.internal_server_error,
+                                        StanzaError.Condition.internal_server_error,
                                         e.getMessage()));
                     }
                     return true;
@@ -430,7 +430,7 @@ public class ConferenceShim
             {
                 return IQUtils.createError(
                         conferenceIQ,
-                        XMPPError.Condition.internal_server_error,
+                        StanzaError.Condition.internal_server_error,
                         "Failed to create new content for type: " + contentType);
             }
 
@@ -447,9 +447,12 @@ public class ConferenceShim
             {
                 // Item not found conditions are assumed to be less critical, as they often happen in case a request
                 // arrives late for an expired endpoint.
-                if (XMPPError.Condition.item_not_found.equals(e.getCondition())) {
+                if (StanzaError.Condition.item_not_found.equals(e.getCondition()))
+                {
                     logger.warn("Error processing channels: " + e);
-                } else {
+                }
+                else
+                {
                     logger.error("Error processing channels: " + e);
                 }
                 return IQUtils.createError(conferenceIQ, e.getCondition(), e.getMessage());
@@ -491,7 +494,7 @@ public class ConferenceShim
             {
                 return IQUtils.createError(
                         conferenceIQ,
-                        XMPPError.Condition.bad_request,
+                        StanzaError.Condition.bad_request,
                         "Can not enable octo without a valid GID.");
             }
 
@@ -503,7 +506,7 @@ public class ConferenceShim
             logger.error("Octo must be enabled for audio and video together");
             return IQUtils.createError(
                     conferenceIQ,
-                    XMPPError.Condition.bad_request,
+                    StanzaError.Condition.bad_request,
                     "Octo only enabled for one media type");
         }
 
