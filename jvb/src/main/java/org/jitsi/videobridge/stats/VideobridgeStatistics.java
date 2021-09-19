@@ -25,9 +25,7 @@ import org.jitsi.utils.logging2.LogContext;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.logging2.LoggerImpl;
 import org.jitsi.videobridge.*;
-import org.jitsi.videobridge.cc.allocation.LayerSnapshot;
-import org.jitsi.videobridge.cc.allocation.SingleAllocation;
-import org.jitsi.videobridge.cc.allocation.VideoConstraints;
+import org.jitsi.videobridge.cc.allocation.*;
 import org.jitsi.videobridge.load_management.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.octo.config.*;
@@ -120,11 +118,10 @@ public class VideobridgeStatistics
     /* Stats required for RL module */
     public static final String RL_STATS = "rl_stats";
 
-
     /**
      * The indicator which determines whether {@link #generate()} is executing
      * on this <tt>VideobridgeStatistics</tt>. If <tt>true</tt>, invocations of
-     * <tt>generate()</tt> will do nothing. Introduced in order to mitigate an
+     * <tt>generate()</tt> will do nothing. Int roduced in order to mitigate an
      * issue in which a blocking in <tt>generate()</tt> will cause a multiple of
      * threads to be initialized and blocked.
      */
@@ -134,9 +131,9 @@ public class VideobridgeStatistics
     private final @Nullable OctoRelayService octoRelayService;
     private final @NotNull XmppConnection xmppConnection;
 
-    static int statIdx = 1;
-    String path = "/rxpcap";
-    File file = null;
+    private final Boolean enableRlStats = Boolean.valueOf(System.getenv("ENABLE_RL_STATS"));
+    private final Boolean enableRlStatsDump = Boolean.valueOf(System.getenv("ENABLE_RL_STATS_DUMP"));
+    private final String rlStatsDumpDir = System.getenv("RL_STATS_DUMP_DIR");
 
     /**
      * Creates instance of <tt>VideobridgeStatistics</tt>.
@@ -165,16 +162,6 @@ public class VideobridgeStatistics
         unlockedSetStat(RTT_AGGREGATE, 0d);
         unlockedSetStat(LARGEST_CONFERENCE, 0);
         unlockedSetStat(CONFERENCE_SIZES, "[]");
-
-        String tmp_timestamp = timestampFormat.format(new Date());
-        unlockedSetStat(TIMESTAMP, tmp_timestamp);
-
-        initFile(tmp_timestamp);
-    }
-
-    public void initFile(String curTime) {
-        /* Initialize file-related stuff */
-        file = new File(path+"/data_"+curTime+".txt");
     }
 
     /**
@@ -331,89 +318,6 @@ public class VideobridgeStatistics
             int cnt = 1;
             for (Endpoint endpoint : conference.getLocalEndpoints())
             {
-                JSONObject epStats = new JSONObject();
-
-                JSONObject videoConstraints = new JSONObject();
-                Map<String, VideoConstraints> videoConstraintsMap = endpoint
-                        .getBitrateController()
-                        .getAllocationSettings()
-                        .getVideoConstraints();
-                for(String epID : videoConstraintsMap.keySet()) {
-                    videoConstraints.put(epID, videoConstraintsMap.get(epID).getMaxHeight());
-                    videoConstraints.put(epID, videoConstraintsMap.get(epID).getMaxFrameRate());
-                }
-                epStats.put("video_constraints", videoConstraints);
-
-//                long pssrc = endpoint.getMediaSource().getPrimarySSRC();
-//                logger.info("##### (" + (cnt) +" ) Endpoint:"+ endpoint.getId() + ", result: " + endpoint.getMediaSource().findRtpEncodingDesc(pssrc));
-
-                JSONObject layerStats = new JSONObject();
-
-                for(Map.Entry<String, List<LayerSnapshot>> entry : endpoint.getBitrateController().getBandwidthAllocator().getAllLayerBps().entrySet()) {
-//                    logger.info("##### (" + endpoint.getId() + ") Endpoint: " + entry.getKey()+ ", AllLayerBps: " + entry.getValue());
-                    List<LayerSnapshot> tmp = entry.getValue();
-                    JSONObject layerQStats = new JSONObject();
-
-                    for(LayerSnapshot i : tmp) {
-                        RtpLayerDesc lDesc = i.component1();
-                        Double bitrate = i.component2();
-
-                        JSONObject layerInfoStats = new JSONObject();
-                        layerInfoStats.put("temporal_id", lDesc.getTid());
-                        layerInfoStats.put("spatial_id", lDesc.getSid());
-                        layerInfoStats.put("height", lDesc.getHeight());
-                        layerInfoStats.put("framerate", lDesc.getFrameRate());
-                        layerInfoStats.put("bitrate", bitrate);
-                        layerQStats.put(lDesc.getLocalIndex(), layerInfoStats);
-                    }
-                    layerStats.put(entry.getKey(), layerQStats);
-                }
-                epStats.put("Layers", layerStats);
-
-                JSONObject allocStats = new JSONObject();
-                Set<SingleAllocation> allocs = endpoint.getBitrateController().getBandwidthAllocator().getAllocation().getAllocations();
-                for(SingleAllocation alloc : allocs) {
-                    JSONObject allocEidStats = new JSONObject();
-                    if (alloc.getTargetLayer() != null) {
-//                        logger.info("########## " + endpoint.getId() + "'s BA -  Endpoint : " + alloc.getEndpointId() + ", TargetLayer : " + alloc.getTargetLayer().toString() + ", IdealLayer : " + alloc.getIdealLayer().toString() + ", targetIdx : " + alloc.getTargetLayer().getIndex());
-                        JSONObject allocTargetStats = new JSONObject();
-                        allocTargetStats.put("target_quality", alloc.getTargetLayer().getIndex());
-                        allocTargetStats.put("target_temporal_id", alloc.getTargetLayer().getTid());
-                        allocTargetStats.put("target_spatial_id", alloc.getTargetLayer().getSid());
-                        allocTargetStats.put("target_framerate", alloc.getTargetLayer().getFrameRate());
-                        allocTargetStats.put("target_height", alloc.getTargetLayer().getHeight());
-                        allocEidStats.put("target", allocTargetStats);
-
-                        JSONObject allocIdealStats = new JSONObject();
-                        allocIdealStats.put("ideal_quality", alloc.getIdealLayer().getIndex());
-                        allocIdealStats.put("ideal_temporal_id", alloc.getIdealLayer().getTid());
-                        allocIdealStats.put("ideal_spatial_id", alloc.getIdealLayer().getSid());
-                        allocIdealStats.put("ideal_framerate", alloc.getIdealLayer().getFrameRate());
-                        allocIdealStats.put("ideal_height", alloc.getIdealLayer().getHeight());
-                        allocEidStats.put("ideal", allocIdealStats);
-                    }
-                    allocStats.put(alloc.getEndpointId(), allocEidStats);
-                }
-                epStats.put("Allocations", allocStats);
-
-//                logger.info("##### (" + (cnt) +" ) Endpoint:"+ endpoint.getId() + ", result: " + endpoint.getMediaSource().findRtpEncodingDesc(pssrc));
-//                logger.info("##### (" + (cnt) + ") Allocation: " + endpoint.getBitrateController().getBandwidthAllocator().getAllocation());
-
-//                for(Map.Entry<String, Long> entry : endpoint.getBitrateController().getBandwidthAllocator().getTargetLayerBps().entrySet()) {
-//                    logger.info("##### (" + endpoint.getId() + ") Endpoint: " + entry.getKey()+ ", TargetLayerBps: " + entry.getValue());
-//                }
-
-                JSONObject sumStats = new JSONObject();
-//                logger.info("##### (" + (cnt++) + ") Available BWE: "+ aBwe + ", TargetBps: " + tBps + ", IdealBps: " + iBps);
-                Long aBwe = endpoint.getBitrateController().getBandwidthAllocator().getAvailableBandwidth();
-                Long tBps = endpoint.getBitrateController().getBandwidthAllocator().getAllocation().getTargetBps();
-                Long iBps = endpoint.getBitrateController().getBandwidthAllocator().getAllocation().getIdealBps();
-                sumStats.put("Available_BW", aBwe);
-                sumStats.put("Total_targetBps", tBps);
-                sumStats.put("Total_idealBps", iBps);
-                epStats.put("Summary", sumStats);
-//                logger.info("##### Result: " + epStats.toJSONString());
-
                 if (endpoint.isOversending())
                 {
                     numOversending++;
@@ -447,54 +351,121 @@ public class VideobridgeStatistics
                     {
                         // We take the abs because otherwise the
                         // aggregate makes no sense.
-                        // jitterSumMs += Math.abs(ssrcJitter);
-                        // jitterCount++;
                         epJitterSumMs += Math.abs(ssrcJitter);
                         epJitterCount++;
                     }
                 }
                 jitterSumMs += epJitterSumMs;
                 jitterCount += epJitterCount;
-                epStats.put("jitter_ms", epJitterCount > 0 ? jitterSumMs/epJitterCount : 0);
 
                 PacketStreamStats.Snapshot outgoingStats = transceiverStats.getOutgoingPacketStreamStats();
                 bitrateUploadBps += outgoingStats.getBitrateBps();
                 packetRateUpload += outgoingStats.getPacketRate();
 
                 EndpointConnectionStats.Snapshot endpointConnectionStats
-                        = transceiverStats.getEndpointConnectionStats();
+                = transceiverStats.getEndpointConnectionStats();
                 double endpointRtt = endpointConnectionStats.getRtt();
                 if (endpointRtt > 0)
                 {
                     rttSumMs += endpointRtt;
                     rttCount++;
                 }
-//                epStats.put("round_trip_time_ms", rttSumMs/rttCount);
-//                epStats.put("round_trip_time_ms", endpointRtt);
-                epStats.put("round_trip_time_ms", rttCount > 0 ? rttSumMs/rttCount : 0);
-
 
                 incomingPacketsReceived += endpointConnectionStats.getIncomingLossStats().getPacketsReceived();
                 incomingPacketsLost += endpointConnectionStats.getIncomingLossStats().getPacketsLost();
 
                 long endpointOutgoingPacketsReceived
-                        = endpointConnectionStats.getOutgoingLossStats().getPacketsReceived();
+                = endpointConnectionStats.getOutgoingLossStats().getPacketsReceived();
                 long endpointOutgoingPacketsLost = endpointConnectionStats.getOutgoingLossStats().getPacketsLost();
                 outgoingPacketsReceived += endpointOutgoingPacketsReceived;
                 outgoingPacketsLost += endpointOutgoingPacketsLost;
 
-                epStats.put("pkt_lost", endpointConnectionStats.getOutgoingLossStats().getPacketsLost());
-                epStats.put("pkt_received", endpointConnectionStats.getOutgoingLossStats().getPacketsReceived());
-
-
                 if (!inactive && endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived > 0)
                 {
                     double endpointOutgoingFractionLost = ((double) endpointOutgoingPacketsLost)
-                            / (endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived);
+                    / (endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived);
                     if (endpointOutgoingFractionLost > 0.1)
                     {
                         endpointsWithHighOutgoingLoss++;
                     }
+                }
+
+                if (this.enableRlStats == true) {
+                    JSONObject epStats = new JSONObject();
+
+                    BitrateController<AbstractEndpoint> bitrateController = endpoint.getBitrateController();
+                    BandwidthAllocator<AbstractEndpoint> bwAllocator = endpoint.getBitrateController().getBandwidthAllocator();
+
+                    JSONObject videoConstraints = new JSONObject();
+                    Map<String, VideoConstraints> videoConstraintsMap = bitrateController.getAllocationSettings().getVideoConstraints();
+                    for(String epID : videoConstraintsMap.keySet()) {
+                        videoConstraints.put(epID, videoConstraintsMap.get(epID).getMaxHeight());
+                        videoConstraints.put(epID, videoConstraintsMap.get(epID).getMaxFrameRate());
+                    }
+                    epStats.put("video_constraints", videoConstraints);
+
+                    JSONObject layerStats = new JSONObject();
+
+                    for(Map.Entry<String, List<LayerSnapshot>> entry : bwAllocator.getAllLayerBps().entrySet()) {
+                        List<LayerSnapshot> tmp = entry.getValue();
+                        JSONObject layerQStats = new JSONObject();
+
+                        for(LayerSnapshot i : tmp) {
+                            RtpLayerDesc lDesc = i.component1();
+                            Double bitrate = i.component2();
+
+                            JSONObject layerInfoStats = new JSONObject();
+                            layerInfoStats.put("temporal_id", lDesc.getTid());
+                            layerInfoStats.put("spatial_id", lDesc.getSid());
+                            layerInfoStats.put("height", lDesc.getHeight());
+                            layerInfoStats.put("framerate", lDesc.getFrameRate());
+                            layerInfoStats.put("bitrate", bitrate);
+                            layerQStats.put(lDesc.getLocalIndex(), layerInfoStats);
+                        }
+                        layerStats.put(entry.getKey(), layerQStats);
+                    }
+                    epStats.put("layers", layerStats);
+
+                    epStats.put("jitter_ms", epJitterCount > 0 ? jitterSumMs/epJitterCount : 0);
+                    epStats.put("round_trip_time_ms", rttCount > 0 ? rttSumMs/rttCount : 0);
+                    epStats.put("pkt_lost", endpointConnectionStats.getOutgoingLossStats().getPacketsLost());
+                    epStats.put("pkt_received", endpointConnectionStats.getOutgoingLossStats().getPacketsReceived());
+
+                    JSONObject allocStats = new JSONObject();
+                    Set<SingleAllocation> allocs = bwAllocator.getAllocation().getAllocations();
+                    for(SingleAllocation alloc : allocs) {
+                        JSONObject allocEidStats = new JSONObject();
+                        RtpLayerDesc targetLayer = alloc.getTargetLayer();
+                        RtpLayerDesc idealLayer = alloc.getIdealLayer();
+                        if (targetLayer != null && idealLayer != null) {
+                            JSONObject allocTargetStats = new JSONObject();
+                            allocTargetStats.put("target_quality", targetLayer.getIndex());
+                            allocTargetStats.put("target_temporal_id", targetLayer.getTid());
+                            allocTargetStats.put("target_spatial_id", targetLayer.getSid());
+                            allocTargetStats.put("target_framerate", targetLayer.getFrameRate());
+                            allocTargetStats.put("target_height", targetLayer.getHeight());
+                            allocEidStats.put("target", allocTargetStats);
+
+                            JSONObject allocIdealStats = new JSONObject();
+                            allocIdealStats.put("ideal_quality", idealLayer.getIndex());
+                            allocIdealStats.put("ideal_temporal_id", idealLayer.getTid());
+                            allocIdealStats.put("ideal_spatial_id", idealLayer.getSid());
+                            allocIdealStats.put("ideal_framerate", idealLayer.getFrameRate());
+                            allocIdealStats.put("ideal_height", idealLayer.getHeight());
+                            allocEidStats.put("ideal", allocIdealStats);
+                        }
+                        allocStats.put(alloc.getEndpointId(), allocEidStats);
+                    }
+                    epStats.put("allocations", allocStats);
+
+                    JSONObject sumStats = new JSONObject();
+                    Long aBwe = bwAllocator.getAvailableBandwidth();
+                    Long tBps = bwAllocator.getAllocation().getTargetBps();
+                    Long iBps = bwAllocator.getAllocation().getIdealBps();
+                    sumStats.put("available_bw", aBwe);
+                    sumStats.put("total_target_bps", tBps);
+                    sumStats.put("total_ideal_bps", iBps);
+                    epStats.put("summary", sumStats);
 
                     confStats.put(endpoint.getId(), epStats);
                 }
@@ -507,21 +478,8 @@ public class VideobridgeStatistics
 
             allStats.put(conference.getGid(), confStats);
         }
-//        logger.info(allStats.toJSONString());
-        timedAllStats.put(statIdx, allStats);
 
-        /* Save the stat info to a file */
-        if(timedAllStats.toString().length() > 50) {
-            statIdx++;
-//            logger.info(timedAllStats.toJSONString());
-            try {
-                FileWriter fw = new FileWriter(file, true);
-                fw.write(timedAllStats.toJSONString()+"\n");
-                fw.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
+        timedAllStats.put(System.currentTimeMillis(), allStats);
 
         // JITTER_AGGREGATE
         double jitterAggregate
@@ -759,9 +717,21 @@ public class VideobridgeStatistics
             unlockedSetStat(
                     MUCS_JOINED,
                     xmppConnection.getMucClientManager().getMucJoinedCount());
-            // unlockedSetStat(RL_STATS, timedAllStats);
-//            unlockedSetStat(RL_STATS, allStats);
+            if (this.enableRlStats) {
+                unlockedSetStat(RL_STATS, timedAllStats);
+            }
 
+            if (this.enableRlStats && this.enableRlStatsDump && !allStats.isEmpty()) {
+                try {
+                    String currentDate = new SimpleDateFormat("dd_MM_yyyy", Locale.getDefault()).format(new Date());
+                    String filePath = rlStatsDumpDir + "/stats_dump_" + currentDate + ".txt";
+                    FileWriter fw = new FileWriter(filePath, true);
+                    fw.write(timedAllStats.toJSONString() + "\n");
+                    fw.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
         finally
         {
