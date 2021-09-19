@@ -25,6 +25,7 @@ import org.jvnet.hk2.annotations.*;
 import javax.inject.*;
 import javax.ws.rs.*;
 import javax.ws.rs.core.*;
+import java.util.Map;
 
 @Path("/colibri/stats")
 @EnabledByConfig(RestApis.COLIBRI)
@@ -36,13 +37,17 @@ public class Stats
 
     @GET
     @Produces(MediaType.APPLICATION_JSON)
-    public String getStats()
+    public String getStats(@QueryParam("rl_stats") boolean rl_stats)
     {
         StatsCollector statsManager = this.statsManager;
 
         if (this.statsManager != null)
         {
-            return JSONSerializer.serializeStatistics(statsManager.getStatistics()).toJSONString();
+            Map<String, Object> stats = statsManager.getStatistics().getStats();
+            if (rl_stats != true) {
+                stats.remove(VideobridgeStatistics.RL_STATS);
+            }
+            return new JSONObject(stats).toJSONString();
         }
         return new JSONObject().toJSONString();
     }

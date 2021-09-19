@@ -46,7 +46,11 @@ public abstract class Statistics
     {
         ColibriStatsExtension ext = new ColibriStatsExtension();
 
-        for (Map.Entry<String, Object> e : statistics.getStats().entrySet())
+        // Do not send RL_STATS via xmpp channel
+        Map<String, Object> stats = statistics.getStats();
+        stats.remove(VideobridgeStatistics.RL_STATS);
+
+        for (Map.Entry<String, Object> e : stats.entrySet())
         {
             ext.addStat(
                     new ColibriStatsExtension.Stat(e.getKey(), e.getValue()));
