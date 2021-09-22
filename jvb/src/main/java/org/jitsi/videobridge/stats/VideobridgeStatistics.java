@@ -135,6 +135,10 @@ public class VideobridgeStatistics
     private final Boolean enableRlStatsDump = Boolean.valueOf(System.getenv("ENABLE_RL_STATS_DUMP"));
     private final String rlStatsDumpDir = System.getenv("RL_STATS_DUMP_DIR");
 
+    private String currentDateStr = null;
+    private String rlDumpFilePath = null;
+    private FileWriter rlDumpFileWriter = null;
+
     /**
      * Creates instance of <tt>VideobridgeStatistics</tt>.
      */
@@ -723,11 +727,17 @@ public class VideobridgeStatistics
 
             if (this.enableRlStats && this.enableRlStatsDump && !allStats.isEmpty()) {
                 try {
-                    String currentDate = new SimpleDateFormat("dd_MM_yyyy", Locale.getDefault()).format(new Date());
-                    String filePath = rlStatsDumpDir + "/stats_dump_" + currentDate + ".txt";
-                    FileWriter fw = new FileWriter(filePath, true);
-                    fw.write(timedAllStats.toJSONString() + "\n");
-                    fw.close();
+                    String nextDateStr = new SimpleDateFormat("dd_MM_yyyy", Locale.getDefault()).format(new Date());
+                    if (currentDateStr != nextDateStr) {
+                        currentDateStr = nextDateStr;
+                        rlDumpFilePath = rlStatsDumpDir + "/stats_dump_" + currentDateStr + ".txt";
+                        if (rlDumpFileWriter != null) {
+                            rlDumpFileWriter.close();
+                        }
+                        rlDumpFileWriter = new FileWriter(rlDumpFilePath, true);
+                    }
+
+                    rlDumpFileWriter.write(timedAllStats.toJSONString() + "\n");
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
