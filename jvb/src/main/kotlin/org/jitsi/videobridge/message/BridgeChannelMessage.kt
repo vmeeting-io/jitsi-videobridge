@@ -306,6 +306,11 @@ class DominantSpeakerMessage @JvmOverloads constructor(
     val dominantSpeakerEndpoint: String,
     val previousSpeakers: List<String>? = null
 ) : BridgeChannelMessage(TYPE) {
+    /**
+     * Construct a message from a list of speakers with the dominant speaker on top. The list must have at least one
+     * element.
+     */
+    constructor(previousSpeakers: List<String>) : this(previousSpeakers[0], previousSpeakers.drop(1))
     companion object {
         const val TYPE = "DominantSpeakerEndpointChangeEvent"
     }
@@ -434,8 +439,15 @@ class VideoTypeMessage(
      * The endpoint ID that the message relates to, or null. When null, the ID is inferred from the channel the
      * message was received on (non-null values are needed only for Octo).
      */
-    val endpointId: String? = null
+    endpointId: String? = null
 ) : BridgeChannelMessage(TYPE) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    var endpointId: String? = endpointId
+        set(value) {
+            field = value
+            resetJsonCache()
+        }
+
     companion object {
         const val TYPE = "VideoTypeMessage"
     }
