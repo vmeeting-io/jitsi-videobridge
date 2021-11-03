@@ -29,6 +29,7 @@ import org.jitsi.nlj.rtp.SsrcAssociationType
 import org.jitsi.nlj.rtp.VideoRtpPacket
 import org.jitsi.nlj.srtp.TlsRole
 import org.jitsi.nlj.stats.BridgeJitterStats
+import org.jitsi.nlj.stats.EndpointConnectionStats
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.stats.PacketDelayStats
 import org.jitsi.nlj.transform.node.ConsumerNode
@@ -235,6 +236,20 @@ class Endpoint @JvmOverloads constructor(
     fun getOrderedEndpoints(): List<AbstractEndpoint> =
         conference.orderedEndpoints.filterNot { it == this }
 
+    /**
+     * Listen for RTT updates from [transceiver] and update the ICE stats the first time an RTT is available. Note that
+     * the RTT is measured via RTCP, since we don't expose response time for STUN requests.
+     */
+    private val rttListener: EndpointConnectionStats.EndpointConnectionStatsListener =
+        object : EndpointConnectionStats.EndpointConnectionStatsListener {
+            override fun onRttUpdate(newRttMs: Double) {
+                if (newRttMs > 0) {
+                    transceiver.removeEndpointConnectionStatsListener(this)
+                    iceTransport.updateStatsOnInitialRtt(newRttMs)
+                }
+            }
+        }
+
     val transceiver = Transceiver(
         id,
         TaskPools.CPU_POOL,
@@ -252,6 +267,7 @@ class Endpoint @JvmOverloads constructor(
 
             override fun trace(f: () -> Unit) = f.invoke()
         })
+        addEndpointConnectionStatsListener(rttListener)
     }
 
     private val bandwidthProbing = BandwidthProbing(
@@ -324,8 +340,8 @@ class Endpoint @JvmOverloads constructor(
                         outgoingSrtpPacketQueue.add(packetInfo)
                     }
                 })
-                TaskPools.IO_POOL.submit(iceTransport::startReadingData)
-                TaskPools.IO_POOL.submit(dtlsTransport::startDtlsHandshake)
+                TaskPools.IO_POOL.execute(iceTransport::startReadingData)
+                TaskPools.IO_POOL.execute(dtlsTransport::startDtlsHandshake)
             }
 
             override fun failed() {
@@ -591,7 +607,7 @@ class Endpoint @JvmOverloads constructor(
     }
 
     fun acceptSctpConnection(sctpServerSocket: SctpServerSocket) {
-        TaskPools.IO_POOL.submit {
+        TaskPools.IO_POOL.execute {
             // We don't want to block the thread calling
             // onDtlsHandshakeComplete so run the socket acceptance in an IO
             // pool thread
@@ -659,7 +675,7 @@ class Endpoint @JvmOverloads constructor(
      */
     fun sendForwardedEndpointsMessage(forwardedEndpoints: Collection<String>) {
         val msg = ForwardedEndpointsMessage(forwardedEndpoints)
-        TaskPools.IO_POOL.submit {
+        TaskPools.IO_POOL.execute {
             try {
                 sendMessage(msg)
             } catch (t: Throwable) {
@@ -814,6 +830,7 @@ class Endpoint @JvmOverloads constructor(
 
     override fun requestKeyframe(mediaSsrc: Long) = transceiver.requestKeyFrame(mediaSsrc)
 
+    /** Whether we are currently oversending to this endpoint. */
     fun isOversending(): Boolean = bitrateController.isOversending()
 
     fun setSelectedEndpoints(selectedEndpoints: List<String>) =
@@ -1150,7 +1167,7 @@ class Endpoint @JvmOverloads constructor(
 
             // Submit this to the pool since we wait on the lock and process any
             // cached packets here as well
-            TaskPools.IO_POOL.submit {
+            TaskPools.IO_POOL.execute {
                 // We grab the lock here so that we can set the SCTP manager and
                 // process any previously-cached packets as an atomic operation.
                 // It also prevents another thread from coming in via
@@ -1199,7 +1216,7 @@ class Endpoint @JvmOverloads constructor(
         fun setSctpManager(sctpManager: SctpManager) {
             // Submit this to the pool since we wait on the lock and process any
             // cached packets here as well
-            TaskPools.IO_POOL.submit {
+            TaskPools.IO_POOL.execute {
                 // We grab the lock here so that we can set the SCTP manager and
                 // process any previously-cached packets as an atomic operation.
                 // It also prevents another thread from coming in via
