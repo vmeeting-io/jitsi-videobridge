@@ -401,7 +401,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
                 .compareTo(BitrateControllerConfig.maxTimeBetweenCalculations()) > 0)
         {
             logger.debug("Forcing an update");
-            TaskPools.CPU_POOL.submit((Runnable) this::update);
+            TaskPools.CPU_POOL.execute(this::update);
         }
     }
 
