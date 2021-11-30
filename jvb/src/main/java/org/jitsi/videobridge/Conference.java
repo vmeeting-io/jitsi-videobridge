@@ -17,7 +17,7 @@ package org.jitsi.videobridge;
 
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
-import org.jitsi.rtp.*;
+import org.jitsi.rtp.Packet;
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.*;
 import org.jitsi.rtp.rtp.*;
 import org.jitsi.utils.collections.*;
@@ -39,7 +39,6 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
-import java.util.stream.*;
 
 import static org.jitsi.utils.collections.JMap.*;
 
@@ -69,7 +68,7 @@ public class Conference
 
     /**
      * A read-only cache of the endpoints in this conference. Note that it
-     * contains only the {@link Endpoint} instances (and not Octo endpoints).
+     * contains only the {@link Endpoint} instances (local endpoints, not Octo endpoints).
      * This is because the cache was introduced for performance reasons only
      * (we iterate over it for each RTP packet) and the Octo endpoints are not
      * needed.
@@ -165,6 +164,13 @@ public class Conference
     private final EndpointConnectionStatusMonitor epConnectionStatusMonitor;
 
     /**
+     * A unique meeting ID optionally set by the signaling server ({@code null} if not explicitly set). It is exposed
+     * via ({@link #getDebugState()} for outside use.
+     */
+    @Nullable
+    private final String meetingId;
+
+    /**
      * Initializes a new <tt>Conference</tt> instance which is to represent a
      * conference in the terms of Jitsi Videobridge which has a specific
      * (unique) ID.
@@ -178,12 +184,14 @@ public class Conference
     public Conference(Videobridge videobridge,
                       String id,
                       EntityBareJid conferenceName,
-                      long gid)
+                      long gid,
+                      @Nullable String meetingId)
     {
         if (gid != GID_NOT_SET && (gid < 0 || gid > 0xffff_ffffL))
         {
             throw new IllegalArgumentException("Invalid GID:" + gid);
         }
+        this.meetingId = meetingId;
         this.videobridge = Objects.requireNonNull(videobridge, "videobridge");
         Map<String, String> context = JMap.ofEntries(
             entry("confId", id),
@@ -194,10 +202,10 @@ public class Conference
             context.put("conf_name", conferenceName.toString());
         }
         logger = new LoggerImpl(Conference.class.getName(), new LogContext(context));
-        this.shim = new ConferenceShim(this, logger);
         this.id = Objects.requireNonNull(id, "id");
         this.gid = gid;
         this.conferenceName = conferenceName;
+        this.shim = new ConferenceShim(this, logger);
 
         speechActivity = new ConferenceSpeechActivity(new SpeechActivityListener());
         updateLastNEndpointsFuture = TaskPools.SCHEDULED_POOL.scheduleAtFixedRate(() -> {
@@ -276,7 +284,7 @@ public class Conference
             }
             catch (IOException e)
             {
-                logger.error("Failed to send message on data channel to: " + endpoint.getID() + ", msg: " + msg, e);
+                logger.error("Failed to send message on data channel to: " + endpoint.getId() + ", msg: " + msg, e);
             }
         }
 
@@ -398,23 +406,17 @@ public class Conference
      */
     private void lastNEndpointsChanged()
     {
-        List<String> lastNEndpointIds
-                = speechActivity.getOrderedEndpoints().stream()
-                    .map(AbstractEndpoint::getID)
-                    .collect(Collectors.toList());
-
-        endpointsCache.forEach(e -> e.lastNEndpointsChanged(lastNEndpointIds));
+        endpointsCache.forEach(Endpoint::lastNEndpointsChanged);
     }
 
     /**
-     * Notifies this instance that {@link #speechActivity} has identified a
-     * speaker switch event in this multipoint conference and there is now a new
+     * Notifies this instance that {@link #speechActivity} has identified a speaker switch event and there is now a new
      * dominant speaker.
      */
     private void dominantSpeakerChanged()
     {
         AbstractEndpoint dominantSpeaker = speechActivity.getDominantEndpoint();
-        String dominantSpeakerId = dominantSpeaker == null ? null : dominantSpeaker.getID();
+        String dominantSpeakerId = dominantSpeaker == null ? null : dominantSpeaker.getId();
 
         if (logger.isInfoEnabled())
         {
@@ -424,7 +426,10 @@ public class Conference
 
         if (dominantSpeaker != null)
         {
-            broadcastMessage(new DominantSpeakerMessage(dominantSpeakerId));
+            broadcastMessage(
+                    new DominantSpeakerMessage(
+                            dominantSpeakerId,
+                            speechActivity.getRecentSpeakers()));
             if (getEndpointCount() > 2)
             {
                 double senderRtt = getRtt(dominantSpeaker);
@@ -468,7 +473,7 @@ public class Conference
     private double getMaxReceiverRtt(String excludedEndpointId)
     {
         return endpointsCache.stream()
-                .filter(ep -> !ep.getID().equalsIgnoreCase(excludedEndpointId))
+                .filter(ep -> !ep.getId().equalsIgnoreCase(excludedEndpointId))
                 .map(Endpoint::getRtt)
                 .mapToDouble(Double::valueOf)
                 .max()
@@ -492,6 +497,8 @@ public class Conference
         }
 
         logger.info("Expiring.");
+
+        shim.close();
 
         epConnectionStatusMonitor.stop();
 
@@ -622,7 +629,7 @@ public class Conference
 
         subscribeToEndpointEvents(endpoint);
 
-        addEndpoint(endpoint);
+        addEndpoints(Collections.singleton(endpoint));
 
         return endpoint;
     }
@@ -695,9 +702,9 @@ public class Conference
     }
 
     /**
-     * Returns the number of local AND remote {@link Endpoint}s in this {@link Conference}.
+     * Returns the number of local AND remote endpoints in this {@link Conference}.
      *
-     * @return the number of local AND remote {@link Endpoint}s in this {@link Conference}.
+     * @return the number of local AND remote endpoints in this {@link Conference}.
      */
     public int getEndpointCount()
     {
@@ -705,9 +712,9 @@ public class Conference
     }
 
     /**
-     * Returns the number of local {@link Endpoint}s in this {@link Conference}.
+     * Returns the number of local endpoints in this {@link Conference}.
      *
-     * @return the number of local {@link Endpoint}s in this {@link Conference}.
+     * @return the number of local endpoints in this {@link Conference}.
      */
     public int getLocalEndpointCount()
     {
@@ -724,6 +731,11 @@ public class Conference
     public List<AbstractEndpoint> getEndpoints()
     {
         return new ArrayList<>(this.endpointsById.values());
+    }
+
+    List<AbstractEndpoint> getOrderedEndpoints()
+    {
+        return speechActivity.getOrderedEndpoints();
     }
 
     /**
@@ -811,7 +823,7 @@ public class Conference
     void endpointExpired(AbstractEndpoint endpoint)
     {
         final AbstractEndpoint removedEndpoint;
-        String id = endpoint.getID();
+        String id = endpoint.getId();
         removedEndpoint = endpointsById.remove(id);
         if (removedEndpoint != null)
         {
@@ -827,49 +839,46 @@ public class Conference
 
         if (removedEndpoint != null)
         {
-            epConnectionStatusMonitor.endpointExpired(removedEndpoint.getID());
             endpointsChanged();
         }
     }
 
     /**
-     * Adds a specific {@link AbstractEndpoint} instance to the list of
-     * endpoints in this conference.
-     * @param endpoint the endpoint to add.
+     * Adds a set of {@link AbstractEndpoint} instances to the list of endpoints in this conference.
      */
-    public void addEndpoint(AbstractEndpoint endpoint)
+    public void addEndpoints(Set<AbstractEndpoint> endpoints)
     {
-        if (endpoint.getConference() != this)
-        {
-            throw new IllegalArgumentException("Endpoint belong to other " +
-                "conference = " + endpoint.getConference());
-        }
+        endpoints.forEach(endpoint -> {
+            if (endpoint.getConference() != this)
+            {
+                throw new IllegalArgumentException("Endpoint belong to other " +
+                        "conference = " + endpoint.getConference());
+            }
+            AbstractEndpoint replacedEndpoint = endpointsById.put(endpoint.getId(), endpoint);
+            if (replacedEndpoint != null)
+            {
+                logger.info("Endpoint with id " + endpoint.getId() + ": " +
+                        replacedEndpoint + " has been replaced by new " +
+                        "endpoint with same id: " + endpoint);
+            }
+        });
 
-        final AbstractEndpoint replacedEndpoint;
-        replacedEndpoint = endpointsById.put(endpoint.getID(), endpoint);
         updateEndpointsCache();
 
         endpointsChanged();
-
-        if (replacedEndpoint != null)
-        {
-            logger.info("Endpoint with id " + endpoint.getID() + ": " +
-                replacedEndpoint + " has been replaced by new " +
-                "endpoint with same id: " + endpoint);
-        }
     }
 
     /**
-     * Notifies this {@link Conference} that one of its {@link Endpoint}s
+     * Notifies this {@link Conference} that one of its endpoints'
      * transport channel has become available.
      *
-     * @param endpoint the {@link Endpoint} whose transport channel has become
+     * @param endpoint the endpoint whose transport channel has become
      * available.
      */
     @Override
     public void endpointMessageTransportConnected(@NotNull AbstractEndpoint endpoint)
     {
-        epConnectionStatusMonitor.endpointConnected(endpoint.getID());
+        epConnectionStatusMonitor.endpointConnected(endpoint.getId());
 
         if (!isExpired())
         {
@@ -879,12 +888,15 @@ public class Conference
             {
                 try
                 {
-                    endpoint.sendMessage(new DominantSpeakerMessage(dominantSpeaker.getID()));
+                    endpoint.sendMessage(
+                            new DominantSpeakerMessage(
+                                    dominantSpeaker.getId(),
+                                    speechActivity.getRecentSpeakers()));
                 }
                 catch (IOException e)
                 {
                     logger.error(
-                            "Failed to send dominant speaker update on data channel to " + endpoint.getID(),
+                            "Failed to send dominant speaker update on data channel to " + endpoint.getId(),
                             e);
                 }
             }
@@ -953,7 +965,7 @@ public class Conference
         PotentialPacketHandler prevHandler = null;
         for (Endpoint endpoint : endpointsCache)
         {
-            if (endpoint.getID().equals(sourceEndpointId))
+            if (endpoint.getId().equals(sourceEndpointId))
             {
                 continue;
             }
@@ -1102,6 +1114,10 @@ public class Conference
         {
             debugState.put("name", conferenceName.toString());
         }
+        if (meetingId != null)
+        {
+            debugState.put("meeting_id", meetingId);
+        }
 
         if (full)
         {
@@ -1121,9 +1137,9 @@ public class Conference
         debugState.put("endpoints", endpoints);
         for (Endpoint e : endpointsCache)
         {
-            if (endpointId == null || endpointId.equals(e.getID()))
+            if (endpointId == null || endpointId.equals(e.getId()))
             {
-                endpoints.put(e.getID(), full ? e.getDebugState() : e.getStatsId());
+                endpoints.put(e.getId(), full ? e.getDebugState() : e.getStatsId());
             }
         }
         return debugState;

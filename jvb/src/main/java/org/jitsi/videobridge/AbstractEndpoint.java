@@ -17,14 +17,14 @@ package org.jitsi.videobridge;
 
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
-import com.google.common.collect.*;
 import org.jitsi.nlj.format.*;
 import org.jitsi.nlj.rtp.*;
 import org.jitsi.nlj.util.*;
 import org.jitsi.utils.*;
+import org.jitsi.utils.event.*;
 import org.jitsi.utils.logging2.*;
+import org.jitsi.videobridge.cc.allocation.*;
 import org.jitsi.videobridge.message.*;
-import org.jitsi.videobridge.rest.root.debug.*;
 import org.jitsi.videobridge.util.*;
 import org.jitsi.xmpp.extensions.colibri.*;
 import org.json.simple.*;
@@ -32,9 +32,6 @@ import org.json.simple.*;
 import java.io.*;
 import java.time.*;
 import java.util.*;
-import java.util.concurrent.*;
-
-import static org.jitsi.videobridge.VideoConstraints.disabledVideoConstraints;
 
 /**
  * Represents an endpoint in a conference (i.e. the entity associated with
@@ -47,12 +44,8 @@ import static org.jitsi.videobridge.VideoConstraints.disabledVideoConstraints;
  * @author Brian Baldino
  */
 public abstract class AbstractEndpoint
+    implements MediaSourceContainer
 {
-    /**
-     * The default video constraints to assume when nothing is signaled.
-     */
-    private static final VideoConstraints defaultMaxReceiverVideoConstraints = disabledVideoConstraints;
-
     /**
      * The (unique) identifier/ID of the endpoint of a participant in a
      * <tt>Conference</tt>.
@@ -60,7 +53,7 @@ public abstract class AbstractEndpoint
     private final String id;
 
     /**
-     * The {@link Logger} used by the {@link Endpoint} class to print debug
+     * The {@link Logger} used by the {@link AbstractEndpoint} class to print debug
      * information.
      */
     protected final Logger logger;
@@ -73,7 +66,7 @@ public abstract class AbstractEndpoint
     /**
      * The map of receiver endpoint id -> video constraints.
      */
-    private final Map<String, VideoConstraints> receiverVideoConstraintsMap = new ConcurrentHashMap<>();
+    private final ReceiverConstraintsMap receiverVideoConstraintsMap = new ReceiverConstraintsMap();
 
     /**
      * The (human readable) display name of this <tt>Endpoint</tt>.
@@ -96,9 +89,15 @@ public abstract class AbstractEndpoint
      * in the conference. The client needs to send _at least_ this to satisfy
      * all receivers.
      */
-    private VideoConstraints maxReceiverVideoConstraints = defaultMaxReceiverVideoConstraints;
+    protected VideoConstraints maxReceiverVideoConstraints = new VideoConstraints(0, 0.0);
 
     protected final EventEmitter<EventHandler> eventEmitter = new EventEmitter<>();
+
+    /**
+     * The latest {@link VideoType} signaled by the endpoint (defaulting to {@code CAMERA} if nothing has been
+     * signaled).
+     */
+    private VideoType videoType = VideoType.CAMERA;
 
     /**
      * Initializes a new {@link AbstractEndpoint} instance.
@@ -113,6 +112,30 @@ public abstract class AbstractEndpoint
         context.put("epId", id);
         logger = parentLogger.createChildLogger(this.getClass().getName(), context);
         this.id = Objects.requireNonNull(id, "id");
+    }
+
+    /**
+     * Return the {@link VideoType} that the endpoint has advertised as available. This reflects the type of stream
+     * even when the stream is suspended (e.g. due to no receivers being subscribed to it).
+     *
+     * In other words, CAMERA or SCREENSHARE means that the endpoint has an available stream, which may be suspended.
+     * NONE means that the endpoint has signaled that it has no available streams.
+     *
+     * Note that when the endpoint has not advertised any video sources, the video type is necessarily {@code NONE}.
+     */
+    @NotNull
+    public VideoType getVideoType()
+    {
+        if (getMediaSource() == null)
+        {
+            return VideoType.NONE;
+        }
+        return videoType;
+    }
+
+    public void setVideoType(VideoType videoType)
+    {
+        this.videoType = videoType;
     }
 
     /**
@@ -133,15 +156,17 @@ public abstract class AbstractEndpoint
      * @return the {@link AbstractEndpointMessageTransport} associated with
      * this endpoint.
      */
-    public AbstractEndpointMessageTransport getMessageTransport()
+    public AbstractEndpointMessageTransport<?> getMessageTransport()
     {
         return null;
     }
 
     /**
-     * Gets the list of media sources that belong to this endpoint.
+     * Gets the description of the video {@link MediaSourceDesc} that this endpoint has advertised, or {@code null} if
+     * it hasn't advertised any video sources.
      */
-    abstract public MediaSourceDesc[] getMediaSources();
+    @Nullable
+    public abstract MediaSourceDesc getMediaSource();
 
     /**
      * Returns the display name of this <tt>Endpoint</tt>.
@@ -168,7 +193,7 @@ public abstract class AbstractEndpoint
      *
      * @return the (unique) identifier/ID of this instance
      */
-    public final String getID()
+    public final String getId()
     {
         return id;
     }
@@ -235,7 +260,7 @@ public abstract class AbstractEndpoint
     @Override
     public String toString()
     {
-        return getClass().getName() + " " + getID();
+        return getClass().getName() + " " + getId();
     }
 
     /**
@@ -327,7 +352,7 @@ public abstract class AbstractEndpoint
     public JSONObject getDebugState()
     {
         JSONObject debugState = new JSONObject();
-        debugState.put("receiverVideoConstraints", receiverVideoConstraintsMap);
+        debugState.put("receiverVideoConstraints", receiverVideoConstraintsMap.getDebugState());
         debugState.put("maxReceiverVideoConstraints", maxReceiverVideoConstraints);
         debugState.put("displayName", displayName);
         debugState.put("expired", expired);
@@ -340,35 +365,22 @@ public abstract class AbstractEndpoint
      * Computes and sets the {@link #maxReceiverVideoConstraints} from the
      * specified video constraints.
      *
-     * @param newVideoConstraints the map of receiver endpoint id -> video
-     * constraints that specifies who (which receiver endpoint) is viewing what
-     * (as determined by the video constraints) from this endpoint (which is the
-     * sender).
+     * @param newMaxHeight the maximum height resulting from the current set of constraints.
+     *                     (Currently we only support constraining the height, and not frame rate.)
      */
-    private void receiverVideoConstraintsChanged(
-        Collection<VideoConstraints> newVideoConstraints)
+    private void receiverVideoConstraintsChanged(int newMaxHeight)
     {
         VideoConstraints oldReceiverMaxVideoConstraints = this.maxReceiverVideoConstraints;
 
-        VideoConstraints newReceiverMaxVideoConstraints = newVideoConstraints
-            .stream()
-            .max(Comparator.comparingInt(VideoConstraints::getIdealHeight))
-            .orElse(defaultMaxReceiverVideoConstraints);
+
+        VideoConstraints newReceiverMaxVideoConstraints = new VideoConstraints(newMaxHeight, -1.0);
 
         if (!newReceiverMaxVideoConstraints.equals(oldReceiverMaxVideoConstraints))
         {
             maxReceiverVideoConstraints = newReceiverMaxVideoConstraints;
-            maxReceiverVideoConstraintsChanged(newReceiverMaxVideoConstraints);
+            sendVideoConstraints(newReceiverMaxVideoConstraints);
         }
     }
-
-    /**
-     * Enables/disables the given feature, if the endpoint implementation supports it.
-     *
-     * @param feature the feature to enable or disable.
-     * @param enabled the state of the feature.
-     */
-    public abstract void setFeature(EndpointDebugFeatures feature, boolean enabled);
 
     /**
      * Whether the remote endpoint is currently sending (non-silence) audio.
@@ -391,25 +403,6 @@ public abstract class AbstractEndpoint
     public abstract void addRtpExtension(RtpExtension rtpExtension);
 
     /**
-     * Sets the video constraints for the streams that this endpoint wishes to
-     * receive expressed as a map of endpoint id to {@link VideoConstraints}.
-     *
-     * NOTE that the map specifies all the constraints that need to be respected
-     * and therefore it resets any previous settings. In other words the map
-     * is not a diff/delta to be applied on top of the existing settings.
-     *
-     * NOTE that if there are no {@link VideoConstraints} specified for an
-     * endpoint, then its {@link VideoConstraints} are assumed to be
-     * {@link org.jitsi.videobridge.cc.BitrateController.defaultVideoConstraints}
-     *
-     * @param videoConstraints the map of endpoint id to {@link VideoConstraints}
-     * that contains the {@link VideoConstraints} to respect when allocating
-     * bandwidth for a specific endpoint.
-     */
-    public abstract void setSenderVideoConstraints(
-        ImmutableMap<String, VideoConstraints> videoConstraints);
-
-    /**
      * Notifies this instance that the max video constraints that the bridge
      * needs to receive from this endpoint has changed. Each implementation
      * handles this notification differently.
@@ -418,7 +411,7 @@ public abstract class AbstractEndpoint
      * needs to receive from this endpoint
      */
     protected abstract void
-    maxReceiverVideoConstraintsChanged(@NotNull VideoConstraints maxVideoConstraints);
+    sendVideoConstraints(@NotNull VideoConstraints maxVideoConstraints);
 
     /**
      * Notifies this instance that a specified received wants to receive
@@ -437,8 +430,8 @@ public abstract class AbstractEndpoint
         if (oldVideoConstraints == null || !oldVideoConstraints.equals(newVideoConstraints))
         {
             logger.debug(
-                () -> "Changed receiver constraints: " + receiverId + ": " + newVideoConstraints.getIdealHeight());
-            receiverVideoConstraintsChanged(receiverVideoConstraintsMap.values());
+                () -> "Changed receiver constraints: " + receiverId + ": " + newVideoConstraints.getMaxHeight());
+            receiverVideoConstraintsChanged(receiverVideoConstraintsMap.getMaxHeight());
         }
     }
 
@@ -454,7 +447,7 @@ public abstract class AbstractEndpoint
         if (receiverVideoConstraintsMap.remove(receiverId) != null)
         {
             logger.debug(() -> "Removed receiver " + receiverId);
-            receiverVideoConstraintsChanged(receiverVideoConstraintsMap.values());
+            receiverVideoConstraintsChanged(receiverVideoConstraintsMap.getMaxHeight());
         }
     }
 

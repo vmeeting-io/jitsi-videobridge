@@ -297,6 +297,7 @@ public class ConfOctoTransport
             conferenceId,
             packetInfo.getEndpointId()
         );
+        ByteBufferPool.returnBuffer(packetInfo.getPacket().getBuffer());
 
         return true;
     }
@@ -341,25 +342,37 @@ public class ConfOctoTransport
      * @param videoSourceGroups the list of source groups for video.
      */
     public void setSources(
-            List<SourcePacketExtension> audioSources,
-            List<SourcePacketExtension> videoSources,
-            List<SourceGroupPacketExtension> videoSourceGroups)
+        List<SourcePacketExtension> audioSources,
+        List<SourcePacketExtension> videoSources,
+        List<SourceGroupPacketExtension> videoSourceGroups)
     {
         if (!running.get())
         {
             return;
         }
-        List<SourcePacketExtension> allSources = new LinkedList<>(audioSources);
-        allSources.addAll(videoSources);
-
         // Jicofo sends an empty "source" when it wants to clear the sources.
-        // This manifests as a failure to find an 'owner', hence we clear the
-        // nulls here.
-        Set<String> endpointIds
-                = allSources.stream()
-                    .map(MediaSourceFactory::getOwner)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toSet());
+        // This manifests as a failure to find an 'owner', so we ignore any sources
+        // for which that is the case here
+        Map<String, Map<MediaType, Set<Long>>> ssrcsByMediaTypeByEpId = new HashMap<>();
+        audioSources.forEach(audioSource -> {
+            String owner;
+            if ((owner = MediaSourceFactory.getOwner(audioSource)) != null)
+            {
+                Map<MediaType, Set<Long>> epSsrcs =
+                    ssrcsByMediaTypeByEpId.computeIfAbsent(owner, key -> new HashMap<>());
+                epSsrcs.computeIfAbsent(MediaType.AUDIO, key -> new HashSet<>()).add(audioSource.getSSRC());
+            }
+        });
+        videoSources.forEach(videoSource -> {
+            String owner;
+            if ((owner = MediaSourceFactory.getOwner(videoSource)) != null)
+            {
+                Map<MediaType, Set<Long>> epSsrcs =
+                    ssrcsByMediaTypeByEpId.computeIfAbsent(owner, key -> new HashMap<>());
+                epSsrcs.computeIfAbsent(MediaType.VIDEO, key -> new HashSet<>()).add(videoSource.getSSRC());
+            }
+        });
+        Set<String> endpointIds = ssrcsByMediaTypeByEpId.keySet();
 
         octoEndpoints.setEndpoints(endpointIds);
 
@@ -376,21 +389,7 @@ public class ConfOctoTransport
 
         endpointIds.forEach(endpointId ->
         {
-            Map<MediaType, Set<Long>> endpointSsrcsByMediaType = new HashMap<>();
-            Set<Long> epAudioSsrcs = audioSources.stream()
-                    .filter(source -> endpointId.equals(MediaSourceFactory.getOwner(source)))
-                    .filter(Objects::nonNull)
-                    .map(SourcePacketExtension::getSSRC)
-                    .collect(Collectors.toSet());
-            endpointSsrcsByMediaType.put(MediaType.AUDIO, epAudioSsrcs);
-
-            Set<Long> epVideoSsrcs = videoSources.stream()
-                    .filter(source -> endpointId.equals(MediaSourceFactory.getOwner(source)))
-                    .filter(Objects::nonNull)
-                    .map(SourcePacketExtension::getSSRC)
-                    .collect(Collectors.toSet());
-            endpointSsrcsByMediaType.put(MediaType.VIDEO, epVideoSsrcs);
-
+            Map<MediaType, Set<Long>> endpointSsrcsByMediaType = ssrcsByMediaTypeByEpId.get(endpointId);
             AbstractEndpoint endpoint = conference.getEndpoint(endpointId);
             if (endpoint instanceof OctoEndpoint)
             {
@@ -518,16 +517,16 @@ public class ConfOctoTransport
     {
         // RX
         private Long packetsReceived = 0L;
-        private final RateTracker receivePacketRate = new RateTracker(Duration.ofSeconds(60));
+        private final RateTracker receivePacketRate = new RateTracker(Duration.ofSeconds(60), Duration.ofSeconds(1));
         private Long bytesReceived = 0L;
-        private final BitrateTracker receiveBitRate = new BitrateTracker(Duration.ofSeconds(60));
+        private final BitrateTracker receiveBitRate = new BitrateTracker(Duration.ofSeconds(60), Duration.ofSeconds(1));
         private long incomingPacketsDropped = 0;
 
         // TX
         private final LongAdder packetsSent = new LongAdder();
-        private final RateTracker sendPacketRate = new RateTracker(Duration.ofSeconds(60));
+        private final RateTracker sendPacketRate = new RateTracker(Duration.ofSeconds(60), Duration.ofSeconds(1));
         private final LongAdder bytesSent = new LongAdder();
-        private final BitrateTracker sendBitRate = new BitrateTracker(Duration.ofSeconds(60));
+        private final BitrateTracker sendBitRate = new BitrateTracker(Duration.ofSeconds(60), Duration.ofSeconds(1));
 
         void packetReceived(int size, Instant time)
         {
@@ -558,13 +557,13 @@ public class ConfOctoTransport
             debugState.put("packets_received", packetsReceived);
             debugState.put("receive_packet_rate_pps", receivePacketRate.getRate());
             debugState.put("bytes_received", bytesReceived);
-            debugState.put("receive_bitrate_bps", receiveBitRate.getRate().getBps());
+            debugState.put("receive_bitrate_bps", receiveBitRate.getRate());
             debugState.put("incoming_packets_dropped", incomingPacketsDropped);
 
             debugState.put("packets_sent", packetsSent.sum());
             debugState.put("send_packet_rate_pps", sendPacketRate.getRate());
             debugState.put("bytes_sent", bytesSent.sum());
-            debugState.put("send_bitrate_bps", sendBitRate.getRate().getBps());
+            debugState.put("send_bitrate_bps", sendBitRate.getRate());
 
             return debugState;
         }

@@ -76,16 +76,17 @@ class BitrateControllerConfig {
         fun onstagePreferredFramerate() = onstagePreferredFramerate
 
         /**
-         * Whether or not we're allowed to suspend the video of the
-         * on-stage participant.
+         * Whether or not we are allowed to oversend (exceed available bandwidth) for the video of the on-stage
+         * participant.
          */
-        private val enableOnstageVideoSuspend: Boolean by config {
-            "org.jitsi.videobridge.ENABLE_ONSTAGE_VIDEO_SUSPEND".from(JitsiConfig.legacyConfig)
-            "videobridge.cc.enable-onstage-video-suspend".from(JitsiConfig.newConfig)
+        private val allowOversendOnStage: Boolean by config {
+            "org.jitsi.videobridge.ENABLE_ONSTAGE_VIDEO_SUSPEND".from(JitsiConfig.legacyConfig).transformedBy { !it }
+            "videobridge.cc.enable-onstage-video-suspend".from(JitsiConfig.newConfig).transformedBy { !it }
+            "videobridge.cc.allow-oversend-onstage".from(JitsiConfig.newConfig)
         }
 
         @JvmStatic
-        fun enableOnstageVideoSuspend(): Boolean = enableOnstageVideoSuspend
+        fun allowOversendOnStage(): Boolean = allowOversendOnStage
 
         /**
          * Whether or not we should trust the bandwidth
@@ -104,8 +105,9 @@ class BitrateControllerConfig {
          * The property for the max resolution to allocate for the onstage
          * participant.
          */
-        private val onstageIdealHeightPx: Int by
-            config("videobridge.cc.onstage-ideal-height-px".from(JitsiConfig.newConfig))
+        private val onstageIdealHeightPx: Int by config(
+            "videobridge.cc.onstage-ideal-height-px".from(JitsiConfig.newConfig)
+        )
 
         @JvmStatic
         fun onstageIdealHeightPx() = onstageIdealHeightPx
@@ -114,8 +116,9 @@ class BitrateControllerConfig {
          * The maximum amount of time we'll run before recalculating which streams we'll
          * forward.
          */
-        private val maxTimeBetweenCalculations: Duration by
-            config("videobridge.cc.max-time-between-calculations".from(JitsiConfig.newConfig))
+        private val maxTimeBetweenCalculations: Duration by config(
+            "videobridge.cc.max-time-between-calculations".from(JitsiConfig.newConfig)
+        )
 
         @JvmStatic
         fun maxTimeBetweenCalculations() = maxTimeBetweenCalculations

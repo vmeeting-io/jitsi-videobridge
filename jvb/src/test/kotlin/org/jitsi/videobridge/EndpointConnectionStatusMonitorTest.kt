@@ -33,7 +33,6 @@ import org.jitsi.utils.logging2.LoggerImpl
 import org.jitsi.utils.mins
 import org.jitsi.utils.secs
 import org.jitsi.videobridge.message.EndpointConnectionStatusMessage
-import org.jitsi.videobridge.octo.OctoEndpoint
 
 class EndpointConnectionStatusMonitorTest : ShouldSpec({
     isolationMode = IsolationMode.InstancePerLeaf
@@ -45,10 +44,7 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
     val localEp2: Endpoint = mockk {
         every { id } returns "2"
     }
-    val remoteEp1: OctoEndpoint = mockk {
-        every { id } returns "3"
-    }
-    val eps = listOf(localEp1, localEp2, remoteEp1)
+    val eps = listOf(localEp1, localEp2)
 
     val broadcastMessage = slot<EndpointConnectionStatusMessage>()
     val broadcastSendToOcto = slot<Boolean>()
@@ -60,7 +56,7 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
     val sendMessageCalls = mutableListOf<Triple<EndpointConnectionStatusMessage, List<AbstractEndpoint>, Boolean>>()
 
     val conference: Conference = mockk {
-        every { endpoints } returns eps
+        every { localEndpoints } returns eps
         every { broadcastMessage(capture(broadcastMessage), capture(broadcastSendToOcto)) } answers {
             broadcastCalls += Pair(broadcastMessage.captured, broadcastSendToOcto.captured)
         }
@@ -88,8 +84,8 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
                 every { it.lastIncomingActivity } returns NEVER
             }
             context("but haven't been around longer than first transfer timeout") {
-                eps.filterIsInstance<Endpoint>().forEach {
-                    every { it.mostRecentChannelCreatedTime } returns clock.instant()
+                eps.forEach {
+                    every { it.getMostRecentChannelCreatedTime() } returns clock.instant()
                 }
                 executor.runOne()
                 should("not fire any events") {
@@ -98,8 +94,8 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
                 }
             }
             context("and have been around longer than first transfer timeout") {
-                eps.filterIsInstance<Endpoint>().forEach {
-                    every { it.mostRecentChannelCreatedTime } returns clock.instant()
+                eps.forEach {
+                    every { it.getMostRecentChannelCreatedTime() } returns clock.instant()
                 }
                 clock.elapse(1.mins)
                 executor.runOne()
@@ -108,18 +104,43 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
                     broadcastCalls shouldHaveSize 2
                     broadcastCalls.forAny { (msg, sendToOcto) ->
                         sendToOcto && msg.endpoint == "1" && msg.active == "false"
+                        sendToOcto shouldBe true
+                        msg.endpoint shouldBe "1"
+                        msg.active shouldBe "false"
                     }
                     broadcastCalls.forAny { (msg, sendToOcto) ->
-                        sendToOcto && msg.endpoint == "2" && msg.active == "false"
+                        sendToOcto shouldBe true
+                        msg.endpoint shouldBe "2"
+                        msg.active shouldBe "false"
+                    }
+                }
+                context("and then become active") {
+                    clock.elapse(30.secs)
+                    eps.forEach {
+                        every { it.lastIncomingActivity } returns clock.instant()
+                    }
+                    executor.runOne()
+                    should("fire broadcast active events for the local endpoints") {
+                        sendMessageCalls.shouldBeEmpty()
+                        // 2 from the messages when it went inactive, and 2 more now for going active
+                        broadcastCalls shouldHaveSize 4
+                        broadcastCalls.forAny { (msg, sendToOcto) ->
+                            sendToOcto shouldBe true
+                            msg.endpoint shouldBe "1"
+                            msg.active shouldBe "true"
+                        }
+                        broadcastCalls.forAny { (msg, sendToOcto) ->
+                            sendToOcto shouldBe true
+                            msg.endpoint shouldBe "2"
+                            msg.active shouldBe "true"
+                        }
                     }
                 }
             }
         }
         context("when the endpoints have had activity") {
             eps.forEach {
-                if (it is Endpoint) {
-                    every { it.mostRecentChannelCreatedTime } returns clock.instant()
-                }
+                every { it.getMostRecentChannelCreatedTime() } returns clock.instant()
                 every { it.lastIncomingActivity } returns clock.instant()
             }
             context("that is within maxInactivityLimit") {
@@ -137,10 +158,14 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
                     sendMessageCalls.shouldBeEmpty()
                     broadcastCalls shouldHaveSize 2
                     broadcastCalls.forAny { (msg, sendToOcto) ->
-                        sendToOcto && msg.endpoint == "1" && msg.active == "false"
+                        sendToOcto shouldBe true
+                        msg.endpoint shouldBe "1"
+                        msg.active shouldBe "false"
                     }
                     broadcastCalls.forAny { (msg, sendToOcto) ->
-                        sendToOcto && msg.endpoint == "2" && msg.active == "false"
+                        sendToOcto shouldBe true
+                        msg.endpoint shouldBe "2"
+                        msg.active shouldBe "false"
                     }
                 }
                 context("but then one becomes active") {
@@ -174,26 +199,6 @@ class EndpointConnectionStatusMonitorTest : ShouldSpec({
                         sendMessageCalls.forAny { (msg, _, _) ->
                             msg.endpoint shouldBe "2"
                             msg.active shouldBe "false"
-                        }
-                    }
-                }
-                context("and then an ep expires") {
-                    monitor.endpointExpired("1")
-                    context("and then a new ep joins") {
-                        every { conference.getEndpoint("4") } returns mockk() { every { id } returns "4" }
-                        monitor.endpointConnected("4")
-                        // We shouldn't get a notification for the expired endpoint
-                        should("update the new endpoint of the other endpoints' statuses") {
-                            sendMessageCalls shouldHaveSize 1
-                            sendMessageCalls.forAll { (_, destEps, sendToOcto) ->
-                                destEps shouldHaveSize 1
-                                destEps.first().id shouldBe "4"
-                                sendToOcto shouldBe false
-                            }
-                            sendMessageCalls.forAny { (msg, _, _) ->
-                                msg.endpoint shouldBe "2"
-                                msg.active shouldBe "false"
-                            }
                         }
                     }
                 }

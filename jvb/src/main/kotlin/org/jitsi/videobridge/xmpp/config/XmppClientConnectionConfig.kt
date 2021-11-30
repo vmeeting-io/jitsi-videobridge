@@ -57,6 +57,15 @@ class XmppClientConnectionConfig {
         .map(StatsTransportConfig::interval)
         .findFirst()
         .orElse(presenceIntervalProperty)
+
+    companion object {
+        /**
+         * The size to set for Smack's JID cache
+         */
+        val jidCacheSize: Int by config {
+            "videobridge.apis.xmpp-client.jid-cache-size".from(JitsiConfig.newConfig)
+        }
+    }
 }
 
 /**
@@ -74,8 +83,12 @@ private fun MutableMap.MutableEntry<String, ConfigValue>.toMucClientConfiguratio
         it.forEach { (propName, propValue) ->
             config.setProperty(propName, propValue.unwrapped().toString())
         }
-    } ?: run { throw Exception("Invalid muc client configuration. " +
-            "Expected type ConfigObject but got ${value.unwrapped()::class.java}") }
+    } ?: run {
+        throw Exception(
+            "Invalid muc client configuration. " +
+                "Expected type ConfigObject but got ${value.unwrapped()::class.java}"
+        )
+    }
 
     return config.also { it.applyDefaultIqHandlerMode() }
 }

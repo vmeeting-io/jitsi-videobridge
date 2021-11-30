@@ -127,7 +127,7 @@ public class VideobridgeExpireThread
     }
 
     /**
-     * Expires the {@link Conference}s and/or {@link Endpoint}s of a specific <tt>Videobridge</tt> if they
+     * Expires the {@link Conference}s and/or endpoints of a specific <tt>Videobridge</tt> if they
      * have been inactive for more than their advertised <tt>expire</tt> number
      * of seconds.
      *
@@ -154,7 +154,7 @@ public class VideobridgeExpireThread
                 {
                     if (endpoint.shouldExpire())
                     {
-                        logger.info("Expiring endpoint " + endpoint.getID());
+                        logger.info("Expiring endpoint " + endpoint.getId());
                         EXPIRE_EXECUTOR.execute(endpoint::expire);
                     }
                 }

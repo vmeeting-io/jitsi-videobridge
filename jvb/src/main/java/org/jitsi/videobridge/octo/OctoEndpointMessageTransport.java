@@ -21,6 +21,7 @@ import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.message.*;
 
 import java.util.*;
+import java.util.stream.*;
 
 /**
  * Extends {@link AbstractEndpointMessageTransport} for the purposes of Octo.
@@ -58,12 +59,12 @@ class OctoEndpointMessageTransport
     @Override
     public void unhandledMessage(BridgeChannelMessage message)
     {
-        logger.warn("Received a message with an unexpected type: " + message.getType());
+        getLogger().warn("Received a message with an unexpected type: " + message.getType());
     }
 
     /**
      * This message indicates that a remote bridge wishes to receive video
-     * with certain constraints for a specific endpoin.
+     * with certain constraints for a specific endpoint.
      * @param message
      * @return
      */
@@ -106,7 +107,7 @@ class OctoEndpointMessageTransport
      * @param message the message that was received from the endpoint.
      */
     @Override
-    public BridgeChannelMessage endpointMessage(EndpointMessage message)
+    public BridgeChannelMessage endpointMessage(@NotNull EndpointMessage message)
     {
         // We trust the "from" field, because it comes from another bridge, not an endpoint.
         //String from = getId(message.getFrom());
@@ -116,7 +117,7 @@ class OctoEndpointMessageTransport
 
         if (conference == null || conference.isExpired())
         {
-            logger.warn("Unable to send EndpointMessage, conference is null or expired");
+            getLogger().warn("Unable to send EndpointMessage, conference is null or expired");
             return null;
         }
 
@@ -138,7 +139,7 @@ class OctoEndpointMessageTransport
             }
             else
             {
-                logger.warn("Unable to find endpoint to send EndpointMessage to: " + to);
+                getLogger().warn("Unable to find endpoint to send EndpointMessage to: " + to);
                 return null;
             }
         }
@@ -147,4 +148,81 @@ class OctoEndpointMessageTransport
         return null;
     }
 
+    /**
+     * Handles an endpoint statistics message on the Octo channel that should be forwarded to
+     * local endpoints as appropriate.
+     *
+     * @param message the message that was received from the endpoint.
+     */
+    @Override
+    public BridgeChannelMessage endpointStats(@NotNull EndpointStats message)
+    {
+        // We trust the "from" field, because it comes from another bridge, not an endpoint.
+
+        Conference conference = octoEndpoints.getConference();
+        if (conference == null || conference.isExpired())
+        {
+            getLogger().warn("Unable to send EndpointStats, conference is null or expired");
+            return null;
+        }
+
+        if (message.getFrom() == null)
+        {
+            getLogger().warn("Unable to send EndpointStats, missing from");
+            return null;
+        }
+
+        AbstractEndpoint from = conference.getEndpoint(message.getFrom());
+        if (from == null)
+        {
+            getLogger().warn("Unable to send EndpointStats, unknown endpoint " + message.getFrom());
+            return null;
+        }
+
+        List<AbstractEndpoint> targets = conference.getLocalEndpoints().stream()
+            .filter((ep) -> ep.wantsStatsFrom(from))
+            .collect(Collectors.toList());
+
+        conference.sendMessage(message, targets, false);
+        return null;
+    }
+
+    @Nullable
+    @Override
+    public BridgeChannelMessage endpointConnectionStatus(@NotNull EndpointConnectionStatusMessage message)
+    {
+        Conference conference = octoEndpoints.getConference();
+
+        if (conference == null || conference.isExpired())
+        {
+            getLogger().warn("Unable to send EndpointConnectionStatusMessage, conference is null or expired");
+            return null;
+        }
+
+        conference.broadcastMessage(message, false /* sendToOcto */);
+        return null;
+    }
+
+    @Override
+    public BridgeChannelMessage videoType(VideoTypeMessage videoTypeMessage)
+    {
+        String endpointId = videoTypeMessage.getEndpointId();
+        if (endpointId == null)
+        {
+            getLogger().warn("Received a VideoTypeMessage with no endpoint ID specified.");
+            return null;
+        }
+
+        AbstractEndpoint endpoint = octoEndpoints.getConference().getEndpoint(endpointId);
+        if (!(endpoint instanceof OctoEndpoint))
+        {
+            getLogger().warn(
+                    "Received a VideoTypeMessage for an invalid endpoint, id=" + endpointId + ", ep=" + endpoint);
+            return null;
+        }
+
+        endpoint.setVideoType(videoTypeMessage.getVideoType());
+
+        return null;
+    }
 }

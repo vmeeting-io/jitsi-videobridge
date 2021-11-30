@@ -15,7 +15,6 @@
  */
 package org.jitsi.videobridge;
 
-import com.google.common.collect.*;
 import org.jetbrains.annotations.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.datachannel.*;
@@ -30,8 +29,10 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.*;
+import java.util.stream.*;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.jitsi.videobridge.EndpointMessageTransportConfig.config;
 
 /**
  * Handles the functionality related to sending and receiving COLIBRI messages
@@ -40,7 +41,7 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  *
  * @author Boris Grozev
  */
-class EndpointMessageTransport
+public class EndpointMessageTransport
     extends AbstractEndpointMessageTransport<Endpoint>
     implements DataChannelStack.DataChannelMessageListener,
         ColibriWebSocket.EventHandler
@@ -69,12 +70,6 @@ class EndpointMessageTransport
     private final EndpointMessageTransportEventHandler eventHandler;
 
     private final AtomicInteger numOutgoingMessagesDropped = new AtomicInteger(0);
-
-    /**
-     * The compatibility layer that translates selected, pinned and max
-     * resolution messages into video constraints.
-     */
-    private final VideoConstraintsCompatibility videoConstraintsCompatibility = new VideoConstraintsCompatibility();
 
     /**
      * The number of sent message by type.
@@ -110,6 +105,7 @@ class EndpointMessageTransport
     @Override
     protected void notifyTransportChannelConnected()
     {
+        endpoint.endpointMessageTransportConnected();
         eventHandler.endpointMessageTransportConnected(endpoint);
     }
 
@@ -125,13 +121,20 @@ class EndpointMessageTransport
         // remote endpoint and the Videobridge is operational.
         // We take care to send the reply using the same transport channel on
         // which we received the request..
-        return new ServerHelloMessage();
+        return createServerHello();
+    }
+
+    @Override
+    public BridgeChannelMessage videoType(VideoTypeMessage videoTypeMessage)
+    {
+        endpoint.setVideoType(videoTypeMessage.getVideoType());
+        return null;
     }
 
     @Override
     public void unhandledMessage(BridgeChannelMessage message)
     {
-        logger.warn("Received a message with an unexpected type: " + message.getType());
+        getLogger().warn("Received a message with an unexpected type: " + message.getType());
     }
 
     /**
@@ -141,6 +144,8 @@ class EndpointMessageTransport
      */
     protected void sendMessage(Object dst, BridgeChannelMessage message)
     {
+        super.sendMessage(dst, message); // Log message
+
         if (dst instanceof ColibriWebSocket)
         {
             sendMessage((ColibriWebSocket) dst, message);
@@ -202,7 +207,7 @@ class EndpointMessageTransport
         Object dst = getActiveTransportChannel();
         if (dst == null)
         {
-            logger.debug("No available transport channel, can't send a message");
+            getLogger().debug("No available transport channel, can't send a message");
             numOutgoingMessagesDropped.incrementAndGet();
         }
         else
@@ -283,10 +288,22 @@ class EndpointMessageTransport
 
             webSocket = ws;
             webSocketLastActive = true;
-            sendMessage(ws, new ServerHelloMessage());
+            sendMessage(ws, createServerHello());
         }
 
         notifyTransportChannelConnected();
+    }
+
+    private ServerHelloMessage createServerHello()
+    {
+        if (config.announceVersion())
+        {
+            return new ServerHelloMessage(endpoint.getConference().getVideobridge().getVersion().toString());
+        }
+        else
+        {
+            return new ServerHelloMessage();
+        }
     }
 
     /**
@@ -301,7 +318,7 @@ class EndpointMessageTransport
             {
                 webSocket = null;
                 webSocketLastActive = false;
-                logger.debug(() -> "Web socket closed, statusCode " + statusCode + " ( " + reason + ").");
+                getLogger().debug(() -> "Web socket closed, statusCode " + statusCode + " ( " + reason + ").");
             }
         }
 
@@ -321,7 +338,7 @@ class EndpointMessageTransport
                 // available and will not be available again.
                 webSocket.getSession().close(410, "replaced");
                 webSocket = null;
-                logger.debug(() -> "Endpoint expired, closed colibri web-socket.");
+                getLogger().debug(() -> "Endpoint expired, closed colibri web-socket.");
             }
         }
     }
@@ -334,7 +351,7 @@ class EndpointMessageTransport
     {
         if (ws == null || !ws.equals(webSocket))
         {
-            logger.warn("Received text from an unknown web socket.");
+            getLogger().warn("Received text from an unknown web socket.");
             return;
         }
 
@@ -387,65 +404,7 @@ class EndpointMessageTransport
         sentCounts.putAll(sentMessagesCounts);
         debugState.put("sent_counts", sentCounts);
 
-        debugState.put("video_constraints_compatibility", videoConstraintsCompatibility.getDebugState());
-
         return debugState;
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@link PinnedEndpointMessage}
-     * has been received.
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage pinnedEndpoint(PinnedEndpointMessage message)
-    {
-        String newPinnedEndpointID = message.getPinnedEndpoint();
-
-        List<String> newPinnedIDs =
-                isBlank(newPinnedEndpointID) ?
-                        Collections.emptyList() :
-                        Collections.singletonList(newPinnedEndpointID);
-
-        pinnedEndpoints(new PinnedEndpointsMessage(newPinnedIDs));
-        return null;
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@code PinnedEndpointsChangedEvent}
-     * has been received.
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage pinnedEndpoints(PinnedEndpointsMessage message)
-    {
-        Set<String> newPinnedEndpoints = new HashSet<>(message.getPinnedEndpoints());
-
-        logger.debug(() -> "Pinned " + newPinnedEndpoints);
-
-        videoConstraintsCompatibility.setPinnedEndpoints(newPinnedEndpoints);
-        setSenderVideoConstraints(videoConstraintsCompatibility.computeVideoConstraints());
-
-        return null;
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@link RecvVideoEndpointsMessage}
-     * has been received.
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage recvVideoEndpoints(RecvVideoEndpointsMessage message)
-    {
-        Set<String> newRecvVideoEndpoints = new HashSet<>(message.getRecvVideoEndpoints());
-
-        logger.debug(() -> "recvVideoEndpoints " + newRecvVideoEndpoints);
-        videoConstraintsCompatibility.setRecvVideoEndpoints(newRecvVideoEndpoints);
-        setSenderVideoConstraints(videoConstraintsCompatibility.computeVideoConstraints());
-        return null;
     }
 
     /**
@@ -477,29 +436,19 @@ class EndpointMessageTransport
     @Override
     public BridgeChannelMessage selectedEndpoints(SelectedEndpointsMessage message)
     {
-        Set<String> newSelectedEndpoints = new HashSet<>(message.getSelectedEndpoints());
+        List<String> newSelectedEndpoints = new ArrayList<>(message.getSelectedEndpoints());
 
-        logger.debug(() -> "Selected " + newSelectedEndpoints);
-        videoConstraintsCompatibility.setSelectedEndpoints(newSelectedEndpoints);
-        setSenderVideoConstraints(videoConstraintsCompatibility.computeVideoConstraints());
+        getLogger().debug(() -> "Selected " + newSelectedEndpoints);
+        endpoint.setSelectedEndpoints(newSelectedEndpoints);
         return null;
     }
 
-    /**
-     * Sets the sender video constraints of this {@link #endpoint}.
-     *
-     * @param videoConstraintsMap the sender video constraints of this
-     * {@link #endpoint}.
-     */
-    public void setSenderVideoConstraints(Map<String, VideoConstraints> videoConstraintsMap)
+    @Nullable
+    @Override
+    public BridgeChannelMessage receiverVideoConstraints(@NotNull ReceiverVideoConstraintsMessage message)
     {
-        // Don't "pollute" the video constraints map with constraints for this
-        // endpoint.
-        videoConstraintsMap.remove(endpoint.getID());
-
-        logger.debug(() -> "New video constraints map: " + videoConstraintsMap);
-
-        endpoint.setSenderVideoConstraints(ImmutableMap.copyOf(videoConstraintsMap));
+        endpoint.setBandwidthAllocationSettings(message);
+        return null;
     }
 
     /**
@@ -512,12 +461,10 @@ class EndpointMessageTransport
     public BridgeChannelMessage receiverVideoConstraint(ReceiverVideoConstraintMessage message)
     {
         int maxFrameHeight = message.getMaxFrameHeight();
-        logger.debug(
-                () -> "Received a maxFrameHeight video constraint from " + endpoint.getID() + ": " + maxFrameHeight);
+        getLogger().debug(
+                () -> "Received a maxFrameHeight video constraint from " + endpoint.getId() + ": " + maxFrameHeight);
 
-        videoConstraintsCompatibility.setMaxFrameHeight(maxFrameHeight);
-        setSenderVideoConstraints(videoConstraintsCompatibility.computeVideoConstraints());
-
+        endpoint.setMaxFrameHeight(maxFrameHeight);
         return null;
     }
 
@@ -530,11 +477,7 @@ class EndpointMessageTransport
     @Override
     public BridgeChannelMessage lastN(LastNMessage message)
     {
-        int lastN = message.getLastN();
-        if (endpoint != null)
-        {
-            endpoint.setLastN(lastN);
-        }
+        endpoint.setLastN(message.getLastN());
 
         return null;
     }
@@ -549,14 +492,14 @@ class EndpointMessageTransport
     public BridgeChannelMessage endpointMessage(EndpointMessage message)
     {
         // First insert/overwrite the "from" to prevent spoofing.
-        String from = endpoint.getID();
+        String from = endpoint.getId();
         message.setFrom(from);
 
         Conference conference = endpoint.getConference();
 
         if (conference == null || conference.isExpired())
         {
-            logger.warn("Unable to send EndpointMessage, conference is null or expired");
+            getLogger().warn("Unable to send EndpointMessage, conference is null or expired");
             return null;
         }
 
@@ -588,12 +531,41 @@ class EndpointMessageTransport
             }
             else
             {
-                logger.warn("Unable to find endpoint to send EndpointMessage to: " + to);
+                getLogger().warn("Unable to find endpoint to send EndpointMessage to: " + to);
                 return null;
             }
         }
 
         conference.sendMessage(message, targets, sendToOcto);
+        return null;
+    }
+
+    /**
+     * Handles an endpoint statistics message from this {@code Endpoint} that should be forwarded to
+     * other endpoints as appropriate, and also to Octo.
+     *
+     * @param message the message that was received from the endpoint.
+     */
+    @Override
+    public BridgeChannelMessage endpointStats(@NotNull EndpointStats message)
+    {
+        // First insert/overwrite the "from" to prevent spoofing.
+        String from = endpoint.getId();
+        message.setFrom(from);
+
+        Conference conference = endpoint.getConference();
+
+        if (conference == null || conference.isExpired())
+        {
+            getLogger().warn("Unable to send EndpointStats, conference is null or expired");
+            return null;
+        }
+
+        List<AbstractEndpoint> targets = conference.getLocalEndpoints().stream()
+            .filter((ep) -> ep != endpoint && ep.wantsStatsFrom(endpoint))
+            .collect(Collectors.toList());
+
+        conference.sendMessage(message, targets, true);
         return null;
     }
 }

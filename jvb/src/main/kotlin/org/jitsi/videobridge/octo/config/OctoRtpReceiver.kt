@@ -18,6 +18,7 @@ package org.jitsi.videobridge.octo.config
 
 import org.jitsi.nlj.AudioLevelListener
 import org.jitsi.nlj.Event
+import org.jitsi.nlj.Features
 import org.jitsi.nlj.PacketHandler
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.RtpReceiver
@@ -38,10 +39,10 @@ import org.jitsi.nlj.transform.node.incoming.BitrateCalculator
 import org.jitsi.nlj.transform.node.incoming.IncomingStatisticsSnapshot
 import org.jitsi.nlj.transform.node.incoming.VideoBitrateCalculator
 import org.jitsi.nlj.transform.node.incoming.VideoParser
-import org.jitsi.nlj.transform.node.incoming.Vp8Parser
+import org.jitsi.nlj.transform.node.incoming.VideoQualityLayerLookup
 import org.jitsi.nlj.transform.packetPath
 import org.jitsi.nlj.transform.pipeline
-import org.jitsi.nlj.util.OrderedJsonObject
+import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.nlj.util.PacketInfoQueue
 import org.jitsi.nlj.util.PacketPredicate
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
@@ -113,7 +114,7 @@ class OctoRtpReceiver(
                             predicate = PacketPredicate { it is VideoRtpPacket }
                             path = pipeline {
                                 node(VideoParser(streamInformationStore, logger))
-                                node(Vp8Parser(logger))
+                                node(VideoQualityLayerLookup(logger))
                                 node(videoBitrateCalculator)
                                 node(pipelineTerminationNode)
                             }
@@ -144,6 +145,7 @@ class OctoRtpReceiver(
 
     override fun enqueuePacket(p: PacketInfo) {
         if (running.get()) {
+            p.addEvent(PACKET_QUEUE_ENTRY_EVENT)
             incomingPacketQueue.add(p)
         } else {
             ByteBufferPool.returnBuffer(p.packet.buffer)
@@ -151,6 +153,7 @@ class OctoRtpReceiver(
     }
 
     private fun handleIncomingPacket(packetInfo: PacketInfo): Boolean {
+        packetInfo.addEvent(PACKET_QUEUE_EXIT_EVENT)
         processPacket(packetInfo)
         return true
     }
@@ -170,6 +173,10 @@ class OctoRtpReceiver(
         // No op(?)
     }
 
+    override fun forceMuteVideo(shouldMute: Boolean) {
+        // noop
+    }
+
     override fun getPacketStreamStats(): PacketStreamStats.Snapshot {
         TODO("Not yet implemented")
     }
@@ -179,6 +186,14 @@ class OctoRtpReceiver(
     }
 
     override fun onRttUpdate(newRttMs: Double) {
+        TODO("Not yet implemented")
+    }
+
+    override fun setFeature(feature: Features, enabled: Boolean) {
+        TODO("Not yet implemented")
+    }
+
+    override fun isFeatureEnabled(feature: Features): Boolean {
         TODO("Not yet implemented")
     }
 
@@ -201,6 +216,9 @@ class OctoRtpReceiver(
     }
 
     companion object {
+        private const val PACKET_QUEUE_ENTRY_EVENT = "Entered Octo RTP receiver incoming queue"
+        private const val PACKET_QUEUE_EXIT_EVENT = "Exited Octo RTP receiver incoming queue"
+
         @JvmField
         val queueErrorCounter = CountingErrorHandler()
     }

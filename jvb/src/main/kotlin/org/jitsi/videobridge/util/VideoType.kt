@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 - present 8x8, Inc.
+ * Copyright @ 2021-Present 8x8, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.jitsi.videobridge.util
 
-package org.jitsi.videobridge.health
-
-import org.jitsi.health.HealthCheckServiceSupplier
-
-class JvbHealthCheckServiceSupplier(
-    private val healthChecker: JvbHealthChecker
-) : HealthCheckServiceSupplier {
-
-    override fun get(): JvbHealthChecker = healthChecker
+enum class VideoType {
+    CAMERA,
+    DESKTOP,
+    NONE
 }

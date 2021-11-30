@@ -36,6 +36,11 @@ import java.util.stream.*;
 public class ConferenceSpeechActivity
 {
     /**
+     * The number of speakers to consider "recent".
+     */
+    public static final int NUM_RECENT_SPEAKERS = 10;
+
+    /**
      * The <tt>Logger</tt> used by the <tt>ConferenceSpeechActivity</tt> class
      * and its instances to print debug information.
      */
@@ -50,8 +55,8 @@ public class ConferenceSpeechActivity
         = ConferenceSpeechActivity.this::activeSpeakerChanged;
 
     /**
-     * The <tt>DominantSpeakerIdentification</tt> instance which
-     * detects/identifies the active/dominant speaker in {@link #conference}.
+     * The <tt>DominantSpeakerIdentification</tt> instance which detects/identifies the active/dominant speaker in a
+     * conference.
      */
     private DominantSpeakerIdentification<String> dominantSpeakerIdentification
             = new DominantSpeakerIdentification<>();
@@ -87,8 +92,7 @@ public class ConferenceSpeechActivity
     /**
      * Initializes a new <tt>ConferenceSpeechActivity</tt> instance.
      *
-     * @param listener the listener to be notified when the dominant speaker or enpoint order change.
-     * represented by the new instance
+     * @param listener the listener to be notified when the dominant speaker or endpoint order change.
      */
     public ConferenceSpeechActivity(@NotNull Listener listener, Logger parentLogger)
     {
@@ -123,7 +127,7 @@ public class ConferenceSpeechActivity
         {
             AbstractEndpoint endpoint
                     = endpointsBySpeechActivity.stream()
-                        .filter(e -> id.equals(e.getID()))
+                        .filter(e -> id.equals(e.getId()))
                         .findFirst().orElse(null);
             // Move this endpoint to the top of our sorted list
             if (!endpointsBySpeechActivity.remove(endpoint))
@@ -156,13 +160,13 @@ public class ConferenceSpeechActivity
     {
         synchronized (syncRoot)
         {
-            Map<Boolean, List<AbstractEndpoint>> bySendingVideo
+            Map<Boolean, List<AbstractEndpoint>> byVideoAvailable
                     = endpointsBySpeechActivity.stream()
-                        .collect(Collectors.groupingBy(AbstractEndpoint::isSendingVideo));
+                        .collect(Collectors.groupingBy(ep -> ep.getVideoType() != VideoType.NONE));
 
             List<AbstractEndpoint> newEndpointsInLastNOrder = new ArrayList<>(endpointsBySpeechActivity.size());
-            newEndpointsInLastNOrder.addAll(bySendingVideo.getOrDefault(true, Collections.emptyList()));
-            newEndpointsInLastNOrder.addAll(bySendingVideo.getOrDefault(false, Collections.emptyList()));
+            newEndpointsInLastNOrder.addAll(byVideoAvailable.getOrDefault(true, Collections.emptyList()));
+            newEndpointsInLastNOrder.addAll(byVideoAvailable.getOrDefault(false, Collections.emptyList()));
 
             if (!newEndpointsInLastNOrder.equals(endpointsInLastNOrder))
             {
@@ -215,6 +219,47 @@ public class ConferenceSpeechActivity
     }
 
     /**
+     * Get at most {@code limit} enties from the history of speakers skipping the first {@code skip}.
+     */
+    public List<String> getSpeakerHistory(int skip, int limit)
+    {
+        synchronized (syncRoot)
+        {
+            return endpointsBySpeechActivity.stream()
+                    .skip(skip)
+                    .limit(limit)
+                    .map(AbstractEndpoint::getId)
+                    .collect(Collectors.toList());
+        }
+    }
+
+    /**
+     * Get a list of recent speakers, other than the current dominant one.
+     */
+    public List<String> getRecentSpeakers()
+    {
+        return getSpeakerHistory(1, NUM_RECENT_SPEAKERS);
+    }
+
+    /**
+     * Query whether an endpoint is a recent speaker.
+     */
+    public boolean isRecentSpeaker(AbstractEndpoint endpoint)
+    {
+        Iterator<AbstractEndpoint> it = endpointsBySpeechActivity.iterator();
+        int i = 0;
+        while (it.hasNext() && i <= NUM_RECENT_SPEAKERS + 1)
+        {
+            if (it.next() == endpoint)
+            {
+                return true;
+            }
+            i++;
+        }
+        return false;
+    }
+
+    /**
      * Notifies this instance that a new audio level was received or measured by an <tt>Endpoint</tt>.
      *
      * @param endpoint the endpoint for which a new audio level was received or measured
@@ -225,7 +270,7 @@ public class ConferenceSpeechActivity
         DominantSpeakerIdentification<String> dsi = this.dominantSpeakerIdentification;
         if (dsi != null)
         {
-            dominantSpeakerIdentification.levelChanged(endpoint.getID(), (int) level);
+            dominantSpeakerIdentification.levelChanged(endpoint.getId(), (int) level);
         }
     }
 
@@ -236,8 +281,7 @@ public class ConferenceSpeechActivity
     {
         boolean endpointsListChanged = false;
         boolean dominantSpeakerChanged = false;
-        // The list of endpoints may have changed, sync our list to make
-        // sure it matches.
+        // The list of endpoints may have changed, sync our list to make sure it matches.
         synchronized (syncRoot)
         {
             // Remove any endpoints we have that are no longer in the conference
@@ -295,13 +339,18 @@ public class ConferenceSpeechActivity
         JSONObject debugState = new JSONObject();
 
         AbstractEndpoint dominantEndpoint = getDominantEndpoint();
-        debugState.put(
-                "dominantEndpoint",
-                dominantEndpoint == null ? "null" : dominantEndpoint.getID());
+        debugState.put("dominantEndpoint", dominantEndpoint == null ? "null" : dominantEndpoint.getId());
         DominantSpeakerIdentification<String> dsi = this.dominantSpeakerIdentification;
-        debugState.put(
-                "dominantSpeakerIdentification",
-                dsi == null ? null : dsi.doGetJSON());
+        debugState.put("dominantSpeakerIdentification", dsi == null ? null : dsi.doGetJSON());
+        synchronized (syncRoot)
+        {
+            debugState.put(
+                    "endpointsBySpeechActivity",
+                    endpointsBySpeechActivity.stream().map(AbstractEndpoint::getId).collect(Collectors.toList()));
+            debugState.put(
+                    "endpointsInLastNOrder",
+                    endpointsInLastNOrder.stream().map(AbstractEndpoint::getId).collect(Collectors.toList()));
+        }
 
         return debugState;
     }

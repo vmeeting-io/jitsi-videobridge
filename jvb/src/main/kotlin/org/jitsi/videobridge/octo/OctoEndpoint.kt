@@ -16,19 +16,17 @@
 
 package org.jitsi.videobridge.octo
 
-import com.google.common.collect.ImmutableMap
+import org.jitsi.nlj.MediaSourceDesc
 import org.jitsi.nlj.PacketHandler
 import org.jitsi.nlj.PacketInfo
+import org.jitsi.nlj.TransceiverEventHandler
 import org.jitsi.nlj.format.PayloadType
 import org.jitsi.nlj.rtp.RtpExtension
 import org.jitsi.utils.MediaType
 import org.jitsi.utils.logging2.Logger
 import org.jitsi.videobridge.AbstractEndpoint
 import org.jitsi.videobridge.Conference
-import org.jitsi.videobridge.rest.root.debug.EndpointDebugFeatures
-import org.jitsi.nlj.MediaSourceDesc
-import org.jitsi.nlj.TransceiverEventHandler
-import org.jitsi.videobridge.VideoConstraints
+import org.jitsi.videobridge.cc.allocation.VideoConstraints
 import org.jitsi.videobridge.message.AddReceiverMessage
 import org.jitsi.videobridge.message.BridgeChannelMessage
 import org.jitsi.videobridge.message.RemoveReceiverMessage
@@ -83,10 +81,6 @@ class OctoEndpoint(
         // single OctoEndpoints instance.
     }
 
-    override fun setSenderVideoConstraints(newVideoConstraints: ImmutableMap<String, VideoConstraints>?) {
-        // NO-OP
-    }
-
     override fun requestKeyframe(mediaSsrc: Long) {
         transceiver.requestKeyframe(mediaSsrc)
     }
@@ -95,25 +89,23 @@ class OctoEndpoint(
         transceiver.requestKeyframe()
     }
 
-    override fun setFeature(feature: EndpointDebugFeatures?, enabled: Boolean) {
-        // NO-OP
-    }
-
     override fun shouldExpire(): Boolean = !transceiver.hasReceiveSsrcs()
 
-    override fun getMediaSources(): Array<MediaSourceDesc> {
-        return transceiver.mediaSources
-    }
+    override val mediaSource: MediaSourceDesc?
+        get() = transceiver.mediaSources.firstOrNull()
 
     /**
      * This [OctoEndpoint] aggregates the constraints from the local endpoints on this bridge, and propagates the max
      * constraints to the bridge that is local for the sending endpoint via an [AddReceiverMessage].
      */
-    override fun maxReceiverVideoConstraintsChanged(maxVideoConstraints: VideoConstraints) {
-        conference.tentacle.sendMessage(AddReceiverMessage(
-            conference.tentacle.bridgeId,
-            id,
-            maxVideoConstraints))
+    override fun sendVideoConstraints(maxVideoConstraints: VideoConstraints) {
+        conference.tentacle.sendMessage(
+            AddReceiverMessage(
+                conference.tentacle.bridgeId,
+                id,
+                maxVideoConstraints
+            )
+        )
     }
 
     override fun receivesSsrc(ssrc: Long): Boolean = transceiver.receivesSsrc(ssrc)

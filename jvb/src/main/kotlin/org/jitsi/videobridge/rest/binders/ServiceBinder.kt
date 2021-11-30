@@ -17,26 +17,25 @@
 package org.jitsi.videobridge.rest.binders
 
 import org.glassfish.hk2.utilities.binding.AbstractBinder
-import org.jitsi.health.HealthCheckServiceSupplier
-import org.jitsi.version.VersionServiceSupplier
+import org.jitsi.health.HealthCheckService
 import org.jitsi.videobridge.Videobridge
-import org.jitsi.videobridge.health.JvbHealthCheckServiceSupplier
 import org.jitsi.videobridge.stats.StatsCollector
-import org.jitsi.videobridge.version.JvbVersionServiceSupplier
 import org.jitsi.videobridge.xmpp.XmppConnection
 
 class ServiceBinder(
     private val videobridge: Videobridge,
     private val xmppConnection: XmppConnection,
-    private val statsCollector: StatsCollector
+    private val statsCollector: StatsCollector?,
+    private val healthChecker: HealthCheckService
 ) : AbstractBinder() {
     override fun configure() {
         bind(videobridge).to(Videobridge::class.java)
-        bind(statsCollector).to(StatsCollector::class.java)
+        // We have to test this, because the nullablle 'StatsCollector?' type doesn't play
+        // nicely in hk2 since we're binding to 'StatsCollector'
+        if (statsCollector != null) {
+            bind(statsCollector).to(StatsCollector::class.java)
+        }
         bind(xmppConnection).to(XmppConnection::class.java)
-        // These are still suppliers rather than direct instances because that's what
-        // Jicoco requires
-        bind(JvbHealthCheckServiceSupplier(videobridge.healthChecker)).to(HealthCheckServiceSupplier::class.java)
-        bind(JvbVersionServiceSupplier(videobridge.versionService)).to(VersionServiceSupplier::class.java)
+        bind(healthChecker).to(HealthCheckService::class.java)
     }
 }

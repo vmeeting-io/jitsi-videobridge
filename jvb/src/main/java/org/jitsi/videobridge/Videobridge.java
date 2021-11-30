@@ -16,21 +16,20 @@
 package org.jitsi.videobridge;
 
 import kotlin.*;
-import org.apache.commons.lang3.*;
+import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
-import org.jitsi.nlj.util.*;
 import org.jitsi.shutdown.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.event.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.queue.*;
 import org.jitsi.utils.version.*;
-import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.load_management.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.octo.config.*;
 import org.jitsi.videobridge.shim.*;
 import org.jitsi.videobridge.util.*;
-import org.jitsi.videobridge.version.*;
 import org.jitsi.videobridge.xmpp.*;
 import org.jitsi.xmpp.extensions.*;
 import org.jitsi.xmpp.extensions.colibri.*;
@@ -112,12 +111,6 @@ public class Videobridge
     private final VideobridgeExpireThread videobridgeExpireThread;
 
     /**
-     * The shim which handles Colibri-related logic for this
-     * {@link Videobridge}.
-     */
-    private final VideobridgeShim shim = new VideobridgeShim(this);
-
-    /**
      * The {@link JvbLoadManager} instance used for this bridge.
      */
     private final JvbLoadManager<PacketRateMeasurement> jvbLoadManager;
@@ -128,9 +121,7 @@ public class Videobridge
      */
     private final ScheduledFuture<?> loadSamplerTask;
 
-    public final JvbHealthChecker healthChecker;
-
-    private final VersionService versionService;
+    private final Version version;
 
     @NotNull private final ShutdownServiceImpl shutdownService;
 
@@ -155,7 +146,8 @@ public class Videobridge
      */
     public Videobridge(
         @Nullable XmppConnection xmppConnection,
-        @NotNull ShutdownServiceImpl shutdownService)
+        @NotNull ShutdownServiceImpl shutdownService,
+        @NotNull Version version)
     {
         videobridgeExpireThread = new VideobridgeExpireThread(this);
         jvbLoadManager = new JvbLoadManager<>(
@@ -185,8 +177,7 @@ public class Videobridge
         {
             xmppConnection.setEventHandler(new XmppConnectionEventHandler());
         }
-        healthChecker = new JvbHealthChecker();
-        versionService = new JvbVersionService();
+        this.version = version;
         this.shutdownService = shutdownService;
     }
 
@@ -197,7 +188,7 @@ public class Videobridge
      * @param gid
      * @return
      */
-    private @NotNull Conference doCreateConference(EntityBareJid name, long gid)
+    private @NotNull Conference doCreateConference(EntityBareJid name, long gid, String meetingId)
     {
         Conference conference = null;
         do
@@ -208,7 +199,7 @@ public class Videobridge
             {
                 if (!conferencesById.containsKey(id))
                 {
-                    conference = new Conference(this, id, name, gid);
+                    conference = new Conference(this, id, name, gid, meetingId);
                     conferencesById.put(id, conference);
                 }
             }
@@ -229,7 +220,7 @@ public class Videobridge
      */
     public @NotNull Conference createConference(EntityBareJid name)
     {
-        return createConference(name, Conference.GID_NOT_SET);
+        return createConference(name, Conference.GID_NOT_SET, null);
     }
 
     /**
@@ -244,13 +235,13 @@ public class Videobridge
      * @return a new <tt>Conference</tt> instance with an ID unique to the
      * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt>
      */
-    public @NotNull Conference createConference(EntityBareJid name, long gid)
+    public @NotNull Conference createConference(EntityBareJid name, long gid, String meetingId)
     {
-        final Conference conference = doCreateConference(name, gid);
+        final Conference conference = doCreateConference(name, gid, meetingId);
 
         logger.info(() -> "create_conf, id=" + conference.getID() + " gid=" + conference.getGid());
 
-        eventEmitter.fireEvent(handler ->
+        eventEmitter.fireEventSync(handler ->
         {
             handler.conferenceCreated(conference);
             return Unit.INSTANCE;
@@ -292,7 +283,7 @@ public class Videobridge
             {
                 conferencesById.remove(id);
                 conference.expire();
-                eventEmitter.fireEvent(handler ->
+                eventEmitter.fireEventSync(handler ->
                 {
                     handler.conferenceExpired(conference);
                     return Unit.INSTANCE;
@@ -353,17 +344,87 @@ public class Videobridge
     }
 
     /**
-     * Handles a <tt>ColibriConferenceIQ</tt> stanza which represents a request.
-     *
-     * @param conferenceIQ the <tt>ColibriConferenceIQ</tt> stanza represents
-     * the request to handle
-     * @return an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza which
-     * represents the response to the specified request or <tt>null</tt> to
-     * reply with <tt>feature-not-implemented</tt>
+     * Handles a COLIBRI request synchronously.
+     * @param conferenceIq The COLIBRI request.
+     * @return The response in the form of an {@link IQ}. It is either an error or a {@link ColibriConferenceIQ}.
      */
-    public IQ handleColibriConferenceIQ(ColibriConferenceIQ conferenceIQ)
+    public IQ handleColibriConferenceIQ(ColibriConferenceIQ conferenceIq)
     {
-        return shim.handleColibriConferenceIQ(conferenceIQ);
+        Conference conference;
+        try
+        {
+            conference = getOrCreateConference(conferenceIq);
+        }
+        catch (ConferenceNotFoundException e)
+        {
+            return IQUtils.createError(
+                    conferenceIq,
+                    XMPPError.Condition.bad_request,
+                    "Conference not found for ID: " + conferenceIq.getID());
+        }
+        catch (InGracefulShutdownException e)
+        {
+            return ColibriConferenceIQ.createGracefulShutdownErrorResponse(conferenceIq);
+        }
+
+        return conference.getShim().handleColibriConferenceIQ(conferenceIq);
+    }
+
+    /**
+     * Handles a COLIBRI request asynchronously.
+     */
+    private void handleColibriRequest(XmppConnection.ColibriRequest request)
+    {
+        ColibriConferenceIQ conferenceIq = request.getRequest();
+        Conference conference;
+        try
+        {
+            conference = getOrCreateConference(conferenceIq);
+        }
+        catch (ConferenceNotFoundException e)
+        {
+            request.getCallback().invoke(
+                    IQUtils.createError(
+                            conferenceIq,
+                            XMPPError.Condition.bad_request,
+                            "Conference not found for ID: " + conferenceIq.getID()));
+            return;
+        }
+        catch (InGracefulShutdownException e)
+        {
+            request.getCallback().invoke(ColibriConferenceIQ.createGracefulShutdownErrorResponse(conferenceIq));
+            return;
+        }
+
+        // It is now the responsibility of Conference to send a response.
+        conference.getShim().enqueueColibriRequest(request);
+    }
+
+    private @NotNull Conference getOrCreateConference(ColibriConferenceIQ conferenceIq)
+            throws ConferenceNotFoundException, InGracefulShutdownException
+    {
+        String conferenceId = conferenceIq.getID();
+        if (conferenceId == null && isShutdownInProgress())
+        {
+            throw new InGracefulShutdownException();
+        }
+
+        if (conferenceId == null)
+        {
+            return createConference(
+                    conferenceIq.getName(),
+                    ColibriUtil.parseGid(conferenceIq.getGID()),
+                    conferenceIq.getMeetingId());
+        }
+        else
+        {
+            Conference conference = getConference(conferenceId);
+            if (conference == null)
+            {
+                throw new ConferenceNotFoundException();
+            }
+            return conference;
+        }
     }
 
     /**
@@ -393,17 +454,6 @@ public class Videobridge
                         XMPPError.Condition.internal_server_error,
                         e.getMessage());
         }
-    }
-
-    /**
-     * Returns a string representing the health of this {@link Videobridge}.
-     * Note that this method does not perform any tests, but only checks the
-     * cached value provided by the {@link org.jitsi.health.HealthCheckService}.
-     */
-    private String getHealthStatus()
-    {
-        Exception result = healthChecker.getResult();
-        return result == null ? "OK" : result.getMessage();
     }
 
     /**
@@ -476,7 +526,6 @@ public class Videobridge
         UlimitCheck.printUlimits();
 
         videobridgeExpireThread.start();
-        healthChecker.start();
 
         // <conference>
         ProviderManager.addIQProvider(
@@ -524,7 +573,6 @@ public class Videobridge
     public void stop()
     {
         videobridgeExpireThread.stop();
-        healthChecker.stop();
         if (loadSamplerTask != null)
         {
             loadSamplerTask.cancel(true);
@@ -551,7 +599,6 @@ public class Videobridge
         debugState.put("shutdownInProgress", shutdownInProgress);
         debugState.put("time", System.currentTimeMillis());
 
-        debugState.put("health", getHealthStatus());
         debugState.put("load-management", jvbLoadManager.getStats());
         debugState.put(Endpoint.overallAverageBridgeJitter.name, Endpoint.overallAverageBridgeJitter.get());
 
@@ -592,43 +639,57 @@ public class Videobridge
         JSONObject queueStats = new JSONObject();
 
         queueStats.put(
-                "srtp_send_queue",
-                getJsonFromQueueErrorHandler(Endpoint.queueErrorCounter));
+            "srtp_send_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(Endpoint.queueErrorCounter,
+                "Endpoint-outgoing-packet-queue"));
         queueStats.put(
-                "octo_receive_queue",
-                getJsonFromQueueErrorHandler(ConfOctoTransport.queueErrorCounter));
+            "octo_receive_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(ConfOctoTransport.queueErrorCounter,
+                "octo-tentacle-outgoing-packet-queue"));
         queueStats.put(
-                "octo_send_queue",
-                getJsonFromQueueErrorHandler(OctoRtpReceiver.queueErrorCounter));
+            "octo_send_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(OctoRtpReceiver.queueErrorCounter,
+                "octo-transceiver-incoming-packet-queue"));
         queueStats.put(
-                "rtp_receiver_queue",
-                getJsonFromQueueErrorHandler(RtpReceiverImpl.Companion.getQueueErrorCounter()));
+            "rtp_receiver_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(RtpReceiverImpl.Companion.getQueueErrorCounter(),
+                "rtp-receiver-incoming-packet-queue"));
         queueStats.put(
-                "rtp_sender_queue",
-                getJsonFromQueueErrorHandler(RtpSenderImpl.Companion.getQueueErrorCounter()));
+            "rtp_sender_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(RtpSenderImpl.Companion.getQueueErrorCounter(),
+                "rtp-sender-incoming-packet-queue"));
+
+        queueStats.put(
+            AbstractEndpointMessageTransport.INCOMING_MESSAGE_QUEUE_ID,
+            getJsonFromQueueStatisticsAndErrorHandler(
+                    null,
+                    AbstractEndpointMessageTransport.INCOMING_MESSAGE_QUEUE_ID));
 
         return queueStats;
     }
 
     @SuppressWarnings("unchecked")
-    private JSONObject getJsonFromQueueErrorHandler(
-            CountingErrorHandler countingErrorHandler)
+    private OrderedJsonObject getJsonFromQueueStatisticsAndErrorHandler(
+            CountingErrorHandler countingErrorHandler,
+            String queueName)
     {
-        JSONObject json = new JSONObject();
-        json.put("dropped_packets", countingErrorHandler.getNumPacketsDropped());
-        json.put("exceptions", countingErrorHandler.getNumExceptions());
+        OrderedJsonObject json = (OrderedJsonObject)QueueStatistics.Companion.getStatistics().get(queueName);
+        if (countingErrorHandler != null)
+        {
+            if (json == null)
+            {
+                json = new OrderedJsonObject();
+                json.put("dropped_packets", countingErrorHandler.getNumPacketsDropped());
+            }
+            json.put("exceptions", countingErrorHandler.getNumExceptions());
+        }
+
         return json;
     }
 
-    /**
-     * Gets the version of the jitsi-videobridge application.
-     */
-    // TODO(brian): this should just return a Version, instead of the VersionService,
-    // but Jicoco needs access to the VersionService right now (though it would work
-    // just fine with just having the Version).  So fix this once Jicoco is fixed.
-    public VersionService getVersionService()
+    public Version getVersion()
     {
-        return versionService;
+        return version;
     }
 
     public void addEventHandler(EventHandler eventHandler)
@@ -645,29 +706,19 @@ public class Videobridge
     {
         @NotNull
         @Override
-        public IQ colibriConferenceIqReceived(@NotNull ColibriConferenceIQ iq)
+        public void colibriConferenceIqReceived(@NotNull XmppConnection.ColibriRequest request)
         {
-            return handleColibriConferenceIQ(iq);
+            handleColibriRequest(request);
         }
 
         @NotNull
         @Override
         public IQ versionIqReceived(@NotNull org.jivesoftware.smackx.iqversion.packet.Version iq)
         {
-            Version currentVersion = versionService.getCurrentVersion();
-            if (currentVersion == null)
-            {
-                return IQ.createErrorResponse(
-                    iq,
-                    XMPPError.getBuilder(XMPPError.Condition.internal_server_error)
-                );
-            }
-
-            // send packet
             org.jivesoftware.smackx.iqversion.packet.Version versionResult =
                 new org.jivesoftware.smackx.iqversion.packet.Version(
-                    currentVersion.getApplicationName(),
-                    currentVersion.toString(),
+                    version.getApplicationName(),
+                    version.toString(),
                     System.getProperty("os.name")
                 );
 
@@ -686,8 +737,6 @@ public class Videobridge
         {
             return handleHealthCheckIQ(iq);
         }
-
-
     }
 
     /**
@@ -774,25 +823,25 @@ public class Videobridge
 
         /**
          * The total number of messages received from the data channels of
-         * the {@link Endpoint}s of this conference.
+         * the endpoints of this conference.
          */
         public AtomicLong totalDataChannelMessagesReceived = new AtomicLong();
 
         /**
          * The total number of messages sent via the data channels of the
-         * {@link Endpoint}s of this conference.
+         * endpoints of this conference.
          */
         public AtomicLong totalDataChannelMessagesSent = new AtomicLong();
 
         /**
          * The total number of messages received from the data channels of
-         * the {@link Endpoint}s of this conference.
+         * the endpoints of this conference.
          */
         public AtomicLong totalColibriWebSocketMessagesReceived = new AtomicLong();
 
         /**
          * The total number of messages sent via the data channels of the
-         * {@link Endpoint}s of this conference.
+         * endpoints of this conference.
          */
         public AtomicLong totalColibriWebSocketMessagesSent = new AtomicLong();
 
@@ -857,4 +906,6 @@ public class Videobridge
         void conferenceCreated(@NotNull Conference conference);
         void conferenceExpired(@NotNull Conference conference);
     }
+    private static class ConferenceNotFoundException extends Exception {}
+    private static class InGracefulShutdownException extends Exception {}
 }

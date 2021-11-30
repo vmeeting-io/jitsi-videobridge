@@ -27,23 +27,11 @@ import java.time.Duration
 
 class StatsManagerConfig {
     /**
-     * Whether or not the stats are enabled
-     */
-    val enabled: Boolean by config {
-        "org.jitsi.videobridge.ENABLE_STATISTICS".from(JitsiConfig.legacyConfig)
-        "videobridge.stats.enabled".from(JitsiConfig.newConfig)
-    }
-
-    /**
      * The interval at which the stats are pushed
      */
     val interval: Duration by config {
-        onlyIf("Stats are enabled", ::enabled) {
-            "org.jitsi.videobridge.STATISTICS_INTERVAL"
-                .from(JitsiConfig.legacyConfig)
-                .convertFrom<Long>(Duration::ofMillis)
-            "videobridge.stats.interval".from(JitsiConfig.newConfig)
-        }
+        "org.jitsi.videobridge.STATISTICS_INTERVAL".from(JitsiConfig.legacyConfig).convertFrom(Duration::ofMillis)
+        "videobridge.stats.interval".from(JitsiConfig.newConfig)
     }
 
     /**
@@ -55,7 +43,7 @@ class StatsManagerConfig {
      *
      * These are now obsolete and only maintained for backward compatibility. Transports should be configured in the
      * modules that define them. See e.g. the implementations in [CallstatsService] and [XmppConnection].
-    */
+     */
     val transportConfigs: List<StatsTransportConfig> by config {
         "org.jitsi.videobridge."
             .from(JitsiConfig.legacyConfig)
@@ -73,8 +61,8 @@ class StatsManagerConfig {
                     ?: throw ConfigException.UnableToRetrieve.NotFound("Could not find transports within stats")
                 transports as ConfigList
                 transports.map { it as ConfigObject }
-                        .map { it.toConfig() }
-                        .mapNotNull { it.toStatsTransportConfig() }
+                    .map { it.toConfig() }
+                    .mapNotNull { it.toStatsTransportConfig() }
             }
         "default" { emptyList() }
     }

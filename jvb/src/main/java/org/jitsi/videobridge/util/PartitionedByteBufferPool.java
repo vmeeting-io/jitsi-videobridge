@@ -17,12 +17,12 @@
 package org.jitsi.videobridge.util;
 
 import org.jetbrains.annotations.*;
+import org.jitsi.utils.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.stats.*;
 import org.json.simple.*;
 
 import java.time.*;
-import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
@@ -57,18 +57,13 @@ class PartitionedByteBufferPool
     private static final Logger logger = new LoggerImpl(PartitionedByteBufferPool.class.getName());
 
     /**
-     * Used to select a partition at random.
-     */
-    private static final Random random = new Random();
-
-    /**
      * The partitions.
      */
     private final Partition[] partitions = new Partition[NUM_PARTITIONS];
 
     /**
      * Whether to keep track of request/return rates and other basic statistics.
-     * As opposed to {@link ByteBufferPool#ENABLE_BOOKKEEPING} this has a
+     * As opposed to {@link ByteBufferPool#bookkeepingEnabled()} this has a
      * relatively low overhead and can be kept on in production if necessary.
      */
     private boolean enableStatistics = false;
@@ -104,7 +99,7 @@ class PartitionedByteBufferPool
      */
     private Partition getPartition()
     {
-        return partitions[random.nextInt(NUM_PARTITIONS)];
+        return partitions[ThreadLocalRandom.current().nextInt(NUM_PARTITIONS)];
     }
 
     /**
@@ -127,15 +122,35 @@ class PartitionedByteBufferPool
      * Adds statistics for this pool to the given JSON object.
      */
     @SuppressWarnings("unchecked")
-    JSONObject getStats()
+    OrderedJsonObject getStats()
     {
-        JSONObject stats = new JSONObject();
+        OrderedJsonObject stats = new OrderedJsonObject();
+
         stats.put("default_size", defaultBufferSize);
+
+        long requests = 0;
+        long returns = 0;
+        long allocations = 0;
+        long storedBytes = 0;
         JSONArray partitionStats = new JSONArray();
+
         for (Partition p : partitions)
         {
+            requests += p.numRequests.sum();
+            returns += p.numReturns.sum();
+            allocations += p.numAllocations.sum();
+            storedBytes += p.storedBytes.get();
+
             partitionStats.add(p.getStatsJson());
         }
+        stats.put("num_requests", requests);
+        stats.put("num_returns", returns);
+        stats.put("num_allocations", allocations);
+        stats.put("stored_bytes", storedBytes);
+        stats.put(
+            "allocation_percent",
+            100D * allocations / Math.max(1, requests));
+
         stats.put("partitions", partitionStats);
         return stats;
     }
@@ -152,6 +167,20 @@ class PartitionedByteBufferPool
         }
 
         return allocations;
+    }
+
+    /**
+     * Gets the total number of bytes currently stored in the pool
+     */
+    long getStoredBytes()
+    {
+        long storedBytes = 0;
+        for (int i = 0; i < NUM_PARTITIONS; i++)
+        {
+            storedBytes += partitions[i].storedBytes.get();
+        }
+
+        return storedBytes;
     }
 
     /**
@@ -221,14 +250,19 @@ class PartitionedByteBufferPool
         private final LongAdder numLargeRequests = new LongAdder();
 
         /**
+         * The total size of buffers stored in the pool.
+         */
+        private final AtomicLong storedBytes = new AtomicLong();
+
+        /**
          * Request rate in requests per second over the last 10 seconds.
          */
-        private final RateTracker requestRate = new RateTracker(Duration.ofSeconds(10));
+        private final RateTracker requestRate = new RateTracker(Duration.ofSeconds(10), Duration.ofMillis(100));
 
         /**
          * Return rate in requests per second over the last 10 seconds.
          */
-        private final RateTracker returnRate = new RateTracker(Duration.ofSeconds(10));
+        private final RateTracker returnRate = new RateTracker(Duration.ofSeconds(10), Duration.ofMillis(100));
 
         /**
          * Initializes a new partition.
@@ -252,13 +286,6 @@ class PartitionedByteBufferPool
          */
         private byte[] getBuffer(int requiredSize)
         {
-            if (ByteBufferPool.ENABLE_BOOKKEEPING)
-            {
-                logger.info("partition " + id + " request number "
-                        + (numRequests.sum() + 1) + ", pool has size "
-                        + pool.size());
-            }
-
             if (enableStatistics)
             {
                 numRequests.increment();
@@ -281,7 +308,7 @@ class PartitionedByteBufferPool
             }
             else if (buf.length < requiredSize)
             {
-                if (ByteBufferPool.ENABLE_BOOKKEEPING)
+                if (ByteBufferPool.bookkeepingEnabled())
                 {
                     logger.info("Needed buffer of size " + requiredSize
                             + ", got size " + buf.length + " retrying");
@@ -300,6 +327,7 @@ class PartitionedByteBufferPool
                 }
                 else if (enableStatistics)
                 {
+                    storedBytes.getAndAdd(-buf.length);
                     numSmallBuffersDiscarded.increment();
                 }
 
@@ -312,15 +340,10 @@ class PartitionedByteBufferPool
             }
             else if (enableStatistics)
             {
+                storedBytes.getAndAdd(-buf.length);
                 numNoAllocationNeeded.increment();
             }
 
-            if (ByteBufferPool.ENABLE_BOOKKEEPING)
-            {
-                logger.info("got buffer " + System.identityHashCode(buf)
-                        + " from thread " + Thread.currentThread().getId()
-                        + ", partition " + id + " now has size " + pool.size());
-            }
             return buf;
         }
 
@@ -330,14 +353,6 @@ class PartitionedByteBufferPool
          */
         private void returnBuffer(@NotNull byte[] buf)
         {
-            if (ByteBufferPool.ENABLE_BOOKKEEPING)
-            {
-                logger.info("returned buffer " + System.identityHashCode(buf) +
-                        " from thread " + Thread.currentThread().getId() + ", partition " + id +
-                        " now has size " + pool.size());
-
-            }
-
             if (enableStatistics)
             {
                 numReturns.increment();
@@ -353,11 +368,19 @@ class PartitionedByteBufferPool
                 if (ACCEPT_SMALL_BUFFERS)
                 {
                     pool.offer(buf);
+                    if (enableStatistics)
+                    {
+                        storedBytes.getAndAdd(buf.length);
+                    }
                 }
             }
             else
             {
                 pool.offer(buf);
+                if (enableStatistics)
+                {
+                    storedBytes.getAndAdd(buf.length);
+                }
             }
         }
 
@@ -365,10 +388,10 @@ class PartitionedByteBufferPool
          * Gets a snapshot of the statistics of this partition in JSON format.
          */
         @SuppressWarnings("unchecked")
-        private JSONObject getStatsJson()
+        private OrderedJsonObject getStatsJson()
         {
             long now = System.currentTimeMillis();
-            JSONObject stats = new JSONObject();
+            OrderedJsonObject stats = new OrderedJsonObject();
             stats.put("id", id);
 
             long numRequestsSum = numRequests.sum();
@@ -379,6 +402,7 @@ class PartitionedByteBufferPool
             stats.put("requests_rate_rps", requestRate.getRate(now));
             stats.put("returns_rate_rps", returnRate.getRate(now));
             stats.put("current_size", pool.size());
+            stats.put("stored_bytes", storedBytes.get());
 
             stats.put("num_allocations", numAllocationsSum);
             stats.put("num_allocations_empty_pool", numEmptyPoolAllocations.sum());

@@ -20,7 +20,7 @@ import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
 import org.jitsi.metaconfig.from
 import org.jitsi.nlj.util.NEVER
-import org.jitsi.nlj.util.OrderedJsonObject
+import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.utils.logging2.cdebug
 import org.jitsi.utils.logging2.createLogger
 import java.time.Clock
@@ -57,8 +57,10 @@ class JvbLoadManager<T : JvbLoadMeasurement> @JvmOverloads constructor(
                     loadReducer.reduceLoad()
                     lastReducerTime = now
                 } else {
-                    logger.info("Load reducer ran at $lastReducerTime, which is within " +
-                        "${loadReducer.impactTime()} of now, not running reduce")
+                    logger.info(
+                        "Load reducer ran at $lastReducerTime, which is within " +
+                            "${loadReducer.impactTime()} of now, not running reduce"
+                    )
                 }
             }
         } else {
@@ -67,8 +69,10 @@ class JvbLoadManager<T : JvbLoadMeasurement> @JvmOverloads constructor(
                 if (loadMeasurement.getLoad() < jvbRecoveryThreshold.getLoad()) {
                     if (canRunReducer(now)) {
                         if (loadReducer.recover()) {
-                            logger.info("Recovery ran after a load measurement of $loadMeasurement (which was " +
-                                "below threshold of $jvbRecoveryThreshold) was received")
+                            logger.info(
+                                "Recovery ran after a load measurement of $loadMeasurement (which was " +
+                                    "below threshold of $jvbRecoveryThreshold) was received"
+                            )
                             lastReducerTime = now
                         } else {
                             logger.cdebug { "Recovery had no work to do" }
@@ -101,5 +105,11 @@ class JvbLoadManager<T : JvbLoadMeasurement> @JvmOverloads constructor(
     enum class State {
         OVERLOADED,
         NOT_OVERLOADED
+    }
+
+    companion object {
+        val averageParticipantStress: Double by config {
+            "videobridge.load-management.average-participant-stress".from(JitsiConfig.newConfig)
+        }
     }
 }

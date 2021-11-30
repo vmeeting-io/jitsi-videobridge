@@ -17,7 +17,7 @@
 package org.jitsi.videobridge.transport.octo
 
 import org.jitsi.nlj.PacketHandler
-import org.jitsi.nlj.util.OrderedJsonObject
+import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.rtp.Packet
 import org.jitsi.rtp.UnparsedPacket
 import org.jitsi.rtp.rtp.RtpPacket
@@ -109,8 +109,10 @@ class BridgeOctoTransport(
                 logger.info("Removing handler for conference $conferenceId")
                 incomingPacketHandlers.remove(conferenceId)
             } else {
-                logger.info("Tried to remove handler for conference $conferenceId but it wasn't the currently " +
-                    "active one")
+                logger.info(
+                    "Tried to remove handler for conference $conferenceId but it wasn't the currently " +
+                        "active one"
+                )
             }
         }
     }

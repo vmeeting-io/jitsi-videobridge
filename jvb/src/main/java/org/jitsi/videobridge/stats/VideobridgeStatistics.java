@@ -20,6 +20,7 @@ import org.jitsi.nlj.stats.*;
 import org.jitsi.nlj.transform.node.incoming.*;
 import org.jitsi.utils.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.load_management.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.octo.config.*;
 import org.jitsi.videobridge.shim.*;
@@ -235,6 +236,11 @@ public class VideobridgeStatistics
         int receiveOnlyEndpoints = 0;
         int numAudioSenders = 0;
         int numVideoSenders = 0;
+        // The number of endpoints to which we're "oversending" (which can occur when
+        // enableOnstageVideoSuspend is false)
+        int numOversending = 0;
+        int endpointsWithHighOutgoingLoss = 0;
+        int numLocalActiveEndpoints = 0;
 
         for (Conference conference : videobridge.getConferences())
         {
@@ -252,6 +258,11 @@ public class VideobridgeStatistics
                 inactiveConferences++;
                 inactiveEndpoints += conference.getEndpointCount();
             }
+            else
+            {
+                numLocalActiveEndpoints += conference.getLocalEndpointCount();
+            }
+
             if (conference.isOctoEnabled())
             {
                 octoConferences++;
@@ -279,6 +290,10 @@ public class VideobridgeStatistics
             }
             for (Endpoint endpoint : conference.getLocalEndpoints())
             {
+                if (endpoint.isOversending())
+                {
+                    numOversending++;
+                }
                 boolean sendingAudio = endpoint.isSendingAudio();
                 boolean sendingVideo = endpoint.isSendingVideo();
                 if (sendingAudio)
@@ -296,7 +311,7 @@ public class VideobridgeStatistics
                 TransceiverStats transceiverStats = endpoint.getTransceiver().getTransceiverStats();
                 IncomingStatisticsSnapshot incomingStats = transceiverStats.getIncomingStats();
                 PacketStreamStats.Snapshot incomingPacketStreamStats = transceiverStats.getIncomingPacketStreamStats();
-                bitrateDownloadBps += incomingPacketStreamStats.getBitrate().getBps();
+                bitrateDownloadBps += incomingPacketStreamStats.getBitrate();
                 packetRateDownload += incomingPacketStreamStats.getPacketRate();
                 for (IncomingSsrcStats.Snapshot ssrcStats : incomingStats.getSsrcStats().values())
                 {
@@ -311,7 +326,7 @@ public class VideobridgeStatistics
                 }
 
                 PacketStreamStats.Snapshot outgoingStats = transceiverStats.getOutgoingPacketStreamStats();
-                bitrateUploadBps += outgoingStats.getBitrate().getBps();
+                bitrateUploadBps += outgoingStats.getBitrate();
                 packetRateUpload += outgoingStats.getPacketRate();
 
                 EndpointConnectionStats.Snapshot endpointConnectionStats
@@ -325,8 +340,22 @@ public class VideobridgeStatistics
 
                 incomingPacketsReceived += endpointConnectionStats.getIncomingLossStats().getPacketsReceived();
                 incomingPacketsLost += endpointConnectionStats.getIncomingLossStats().getPacketsLost();
-                outgoingPacketsReceived += endpointConnectionStats.getOutgoingLossStats().getPacketsReceived();
-                outgoingPacketsLost += endpointConnectionStats.getOutgoingLossStats().getPacketsLost();
+
+                long endpointOutgoingPacketsReceived
+                        = endpointConnectionStats.getOutgoingLossStats().getPacketsReceived();
+                long endpointOutgoingPacketsLost = endpointConnectionStats.getOutgoingLossStats().getPacketsLost();
+                outgoingPacketsReceived += endpointOutgoingPacketsReceived;
+                outgoingPacketsLost += endpointOutgoingPacketsLost;
+
+                if (!inactive && endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived > 0)
+                {
+                    double endpointOutgoingFractionLost = ((double) endpointOutgoingPacketsLost)
+                            / (endpointOutgoingPacketsLost + endpointOutgoingPacketsReceived);
+                    if (endpointOutgoingFractionLost > 0.1)
+                    {
+                        endpointsWithHighOutgoingLoss++;
+                    }
+                }
             }
 
             updateBuckets(audioSendersBuckets, conferenceAudioSenders);
@@ -395,13 +424,19 @@ public class VideobridgeStatistics
         {
             unlockedSetStat(INCOMING_LOSS, incomingLoss);
             unlockedSetStat(OUTGOING_LOSS, outgoingLoss);
+
             unlockedSetStat(OVERALL_LOSS, overallLoss);
+            // The number of active endpoints that have more than 10% loss in the bridge->endpoint direction.
+            unlockedSetStat("endpoints_with_high_outgoing_loss", endpointsWithHighOutgoingLoss);
+            // The number of local (non-octo) active (in a conference where at least one endpoint sends audio or video)
+            // endpoints.
+            unlockedSetStat("local_active_endpoints", numLocalActiveEndpoints);
             unlockedSetStat(
                     BITRATE_DOWNLOAD,
-                    (bitrateDownloadBps + 500) / 1000 /* kbps */);
+                    bitrateDownloadBps / 1000 /* kbps */);
             unlockedSetStat(
                     BITRATE_UPLOAD,
-                    (bitrateUploadBps + 500) / 1000 /* kbps */);
+                    bitrateUploadBps / 1000 /* kbps */);
             unlockedSetStat(PACKET_RATE_DOWNLOAD, packetRateDownload);
             unlockedSetStat(PACKET_RATE_UPLOAD, packetRateUpload);
             // TODO seems broken (I see values of > 11 seconds)
@@ -453,6 +488,11 @@ public class VideobridgeStatistics
                 "stress_level",
                 jvbStats.stressLevel
             );
+            unlockedSetStat(
+                "average_participant_stress",
+                JvbLoadManager.Companion.getAverageParticipantStress()
+            );
+            unlockedSetStat("num_eps_oversending", numOversending);
             unlockedSetStat(CONFERENCES, conferences);
             unlockedSetStat(OCTO_CONFERENCES, octoConferences);
             unlockedSetStat(INACTIVE_CONFERENCES, inactiveConferences);
@@ -540,7 +580,7 @@ public class VideobridgeStatistics
             {
                 unlockedSetStat(REGION, region);
             }
-            unlockedSetStat(VERSION, videobridge.getVersionService().getCurrentVersion().toString());
+            unlockedSetStat(VERSION, videobridge.getVersion().toString());
 
             // TODO(brian): expose these stats in a `getStats` call in XmppConnection
             //  rather than calling xmppConnection.getMucClientManager?

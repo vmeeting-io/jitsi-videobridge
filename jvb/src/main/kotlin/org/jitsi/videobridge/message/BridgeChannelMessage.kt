@@ -17,6 +17,7 @@ package org.jitsi.videobridge.message
 
 import com.fasterxml.jackson.annotation.JsonAnyGetter
 import com.fasterxml.jackson.annotation.JsonAnySetter
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -24,12 +25,13 @@ import com.fasterxml.jackson.annotation.JsonSubTypes
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.JsonMappingException
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.MapperFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import org.apache.logging.log4j.util.Strings.isEmpty
-import org.jitsi.videobridge.VideoConstraints
-import org.json.simple.JSONObject
+import org.jitsi.utils.ResettableLazy
+import org.jitsi.videobridge.cc.allocation.VideoConstraints
+import org.jitsi.videobridge.util.VideoType
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -42,40 +44,54 @@ import java.util.concurrent.atomic.AtomicLong
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "colibriClass")
 @JsonSubTypes(
-    JsonSubTypes.Type(value = RecvVideoEndpointsMessage::class, name = RecvVideoEndpointsMessage.TYPE),
     JsonSubTypes.Type(value = SelectedEndpointsMessage::class, name = SelectedEndpointsMessage.TYPE),
     JsonSubTypes.Type(value = SelectedEndpointMessage::class, name = SelectedEndpointMessage.TYPE),
-    JsonSubTypes.Type(value = PinnedEndpointsMessage::class, name = PinnedEndpointsMessage.TYPE),
-    JsonSubTypes.Type(value = PinnedEndpointMessage::class, name = PinnedEndpointMessage.TYPE),
     JsonSubTypes.Type(value = ClientHelloMessage::class, name = ClientHelloMessage.TYPE),
     JsonSubTypes.Type(value = ServerHelloMessage::class, name = ServerHelloMessage.TYPE),
     JsonSubTypes.Type(value = EndpointMessage::class, name = EndpointMessage.TYPE),
+    JsonSubTypes.Type(value = EndpointStats::class, name = EndpointStats.TYPE),
     JsonSubTypes.Type(value = LastNMessage::class, name = LastNMessage.TYPE),
     JsonSubTypes.Type(value = ReceiverVideoConstraintMessage::class, name = ReceiverVideoConstraintMessage.TYPE),
-    JsonSubTypes.Type(value = ReceiverVideoConstraintsMessage::class, name = ReceiverVideoConstraintsMessage.TYPE),
     JsonSubTypes.Type(value = DominantSpeakerMessage::class, name = DominantSpeakerMessage.TYPE),
     JsonSubTypes.Type(value = EndpointConnectionStatusMessage::class, name = EndpointConnectionStatusMessage.TYPE),
     JsonSubTypes.Type(value = ForwardedEndpointsMessage::class, name = ForwardedEndpointsMessage.TYPE),
     JsonSubTypes.Type(value = SenderVideoConstraintsMessage::class, name = SenderVideoConstraintsMessage.TYPE),
     JsonSubTypes.Type(value = AddReceiverMessage::class, name = AddReceiverMessage.TYPE),
-    JsonSubTypes.Type(value = RemoveReceiverMessage::class, name = RemoveReceiverMessage.TYPE)
+    JsonSubTypes.Type(value = RemoveReceiverMessage::class, name = RemoveReceiverMessage.TYPE),
+    JsonSubTypes.Type(value = ReceiverVideoConstraintsMessage::class, name = ReceiverVideoConstraintsMessage.TYPE),
+    JsonSubTypes.Type(value = VideoTypeMessage::class, name = VideoTypeMessage.TYPE)
 )
-// The type is included as colibriClass (as we want) by the annotation above.
-@JsonIgnoreProperties("type")
 sealed class BridgeChannelMessage(
+    // The type is included as colibriClass (as it has to be on the wire) by the annotation above.
+    @JsonIgnore
     val type: String
 ) {
+    private val jsonCacheDelegate = ResettableLazy { createJson() }
     /**
-     * Serialize this [BridgeChannelMessage] to a string in JSON format. Note that this default implementation is very
+     * Caches the JSON string representation of this object. Note that after any changes to state (e.g. vars being set)
+     * the cache needs to be invalidated via [resetJsonCache].
+     */
+    private val jsonCache: String by jsonCacheDelegate
+    protected fun resetJsonCache() = jsonCacheDelegate.reset()
+    /**
+     * Get a JSON representation of this [BridgeChannelMessage].
+     */
+    fun toJson(): String = jsonCache
+
+    /**
+     * Serialize this [BridgeChannelMessage] to a string in JSON format. Note that this default implementation can be
      * slow, which is why some of the messages that we serialize often override it with a custom optimized version.
      */
-    open fun toJson(): String = ObjectMapper().writeValueAsString(this)
+    protected open fun createJson(): String = mapper.writeValueAsString(this)
 
     companion object {
+        private val mapper = jacksonObjectMapper().apply {
+            enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
+        }
         @JvmStatic
         @Throws(JsonProcessingException::class, JsonMappingException::class)
         fun parse(string: String): BridgeChannelMessage {
-            return jacksonObjectMapper().readValue(string)
+            return mapper.readValue(string)
         }
     }
 }
@@ -90,23 +106,22 @@ open class MessageHandler {
         receivedCounts.computeIfAbsent(message::class.java.simpleName) { AtomicLong() }.incrementAndGet()
 
         return when (message) {
-            is RecvVideoEndpointsMessage -> recvVideoEndpoints(message)
             is SelectedEndpointsMessage -> selectedEndpoints(message)
             is SelectedEndpointMessage -> selectedEndpoint(message)
-            is PinnedEndpointsMessage -> pinnedEndpoints(message)
-            is PinnedEndpointMessage -> pinnedEndpoint(message)
             is ClientHelloMessage -> clientHello(message)
             is ServerHelloMessage -> serverHello(message)
             is EndpointMessage -> endpointMessage(message)
+            is EndpointStats -> endpointStats(message)
             is LastNMessage -> lastN(message)
             is ReceiverVideoConstraintMessage -> receiverVideoConstraint(message)
-            is ReceiverVideoConstraintsMessage -> receiverVideoConstraints(message)
             is DominantSpeakerMessage -> dominantSpeaker(message)
             is EndpointConnectionStatusMessage -> endpointConnectionStatus(message)
             is ForwardedEndpointsMessage -> forwardedEndpoints(message)
             is SenderVideoConstraintsMessage -> senderVideoConstraints(message)
             is AddReceiverMessage -> addReceiver(message)
             is RemoveReceiverMessage -> removeReceiver(message)
+            is ReceiverVideoConstraintsMessage -> receiverVideoConstraints(message)
+            is VideoTypeMessage -> videoType(message)
         }
     }
 
@@ -116,35 +131,24 @@ open class MessageHandler {
         return null
     }
 
-    open fun recvVideoEndpoints(message: RecvVideoEndpointsMessage) = unhandledMessageReturnNull(message)
     open fun selectedEndpoints(message: SelectedEndpointsMessage) = unhandledMessageReturnNull(message)
     open fun selectedEndpoint(message: SelectedEndpointMessage) = unhandledMessageReturnNull(message)
-    open fun pinnedEndpoints(message: PinnedEndpointsMessage) = unhandledMessageReturnNull(message)
-    open fun pinnedEndpoint(message: PinnedEndpointMessage) = unhandledMessageReturnNull(message)
     open fun clientHello(message: ClientHelloMessage) = unhandledMessageReturnNull(message)
     open fun serverHello(message: ServerHelloMessage) = unhandledMessageReturnNull(message)
     open fun endpointMessage(message: EndpointMessage) = unhandledMessageReturnNull(message)
+    open fun endpointStats(message: EndpointStats) = unhandledMessageReturnNull(message)
     open fun lastN(message: LastNMessage) = unhandledMessageReturnNull(message)
     open fun receiverVideoConstraint(message: ReceiverVideoConstraintMessage) = unhandledMessageReturnNull(message)
-    open fun receiverVideoConstraints(message: ReceiverVideoConstraintsMessage) = unhandledMessageReturnNull(message)
     open fun dominantSpeaker(message: DominantSpeakerMessage) = unhandledMessageReturnNull(message)
     open fun endpointConnectionStatus(message: EndpointConnectionStatusMessage) = unhandledMessageReturnNull(message)
     open fun forwardedEndpoints(message: ForwardedEndpointsMessage) = unhandledMessageReturnNull(message)
     open fun senderVideoConstraints(message: SenderVideoConstraintsMessage) = unhandledMessageReturnNull(message)
     open fun addReceiver(message: AddReceiverMessage) = unhandledMessageReturnNull(message)
     open fun removeReceiver(message: RemoveReceiverMessage) = unhandledMessageReturnNull(message)
+    open fun receiverVideoConstraints(message: ReceiverVideoConstraintsMessage) = unhandledMessageReturnNull(message)
+    open fun videoType(message: VideoTypeMessage) = unhandledMessageReturnNull(message)
 
     fun getReceivedCounts() = receivedCounts.mapValues { it.value.get() }
-}
-
-/**
- * A message sent from a client to a bridge, indicating that the list of endpoints to recv video changed.
- */
-class RecvVideoEndpointsMessage(val recvVideoEndpoints: List<String>) : BridgeChannelMessage(TYPE) {
-
-    companion object {
-        const val TYPE = "RecvVideoEndpointsChangedEvent"
-    }
 }
 
 /**
@@ -171,29 +175,6 @@ class SelectedEndpointMessage(val selectedEndpoint: String?) : BridgeChannelMess
 }
 
 /**
- * A message sent from a client to a bridge, indicating that the list of endpoints pinned by the client has changed.
- */
-class PinnedEndpointsMessage(val pinnedEndpoints: List<String>) : BridgeChannelMessage(TYPE) {
-
-    companion object {
-        const val TYPE = "PinnedEndpointsChangedEvent"
-    }
-}
-
-/**
- * A message sent from a client to a bridge, indicating that the client's pinned endpoint has changed.
- *
- * This format is no longer used in jitsi-meet and is considered deprecated. The semantics are equivalent to
- * [PinnedEndpointsMessage] with a list of one endpoint.
- */
-@Deprecated("Use SelectedEndpointsMessage")
-class PinnedEndpointMessage(val pinnedEndpoint: String?) : BridgeChannelMessage(TYPE) {
-    companion object {
-        const val TYPE = "PinnedEndpointChangedEvent"
-    }
-}
-
-/**
  * A message sent from a client to a bridge in the beginning of a session.
  */
 class ClientHelloMessage : BridgeChannelMessage(TYPE) {
@@ -205,12 +186,16 @@ class ClientHelloMessage : BridgeChannelMessage(TYPE) {
 /**
  * A message sent from a bridge to a client in response to a [ClientHelloMessage] or when a websocket is accepted.
  */
-class ServerHelloMessage : BridgeChannelMessage(TYPE) {
-    override fun toJson() = JSON_STRING
+class ServerHelloMessage @JvmOverloads constructor(
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    val version: String? = null
+) : BridgeChannelMessage(TYPE) {
 
+    override fun createJson(): String =
+        if (version == null) JSON_STRING_NO_VERSION else """{"colibriClass":"$TYPE","version":"$version"}"""
     companion object {
         const val TYPE = "ServerHello"
-        val JSON_STRING: String = ObjectMapper().writeValueAsString(ServerHelloMessage())
+        const val JSON_STRING_NO_VERSION: String = """{"colibriClass":"$TYPE"}"""
     }
 }
 
@@ -227,6 +212,10 @@ class ServerHelloMessage : BridgeChannelMessage(TYPE) {
 class EndpointMessage(val to: String) : BridgeChannelMessage(TYPE) {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     var from: String? = null
+        set(value) {
+            field = value
+            resetJsonCache()
+        }
 
     @get:JsonAnyGetter
     val otherFields = mutableMapOf<String, Any>()
@@ -234,25 +223,47 @@ class EndpointMessage(val to: String) : BridgeChannelMessage(TYPE) {
     /**
      * Whether this message is to be broadcast or targeted to a specific endpoint.
      */
-    val isBroadcast: Boolean = isEmpty(to)
+    @JsonIgnore
+    fun isBroadcast(): Boolean = isEmpty(to)
 
     @JsonAnySetter
     fun put(key: String, value: Any) {
         otherFields[key] = value
     }
 
-    /**
-     * Serialize using json-simple because it's faster.
-     */
-    override fun toJson(): String = JSONObject().apply {
-        this["colibriClass"] = TYPE
-        from?.let { this["from"] = it }
-        this["to"] = to
-        putAll(otherFields)
-    }.toJSONString()
-
     companion object {
         const val TYPE = "EndpointMessage"
+    }
+}
+
+/**
+ * An endpoint statistics message, which originates from one endpoint and is routed by the bridge.
+ * When received from a client it is filtered depending on which endpoints are "interesting" to other clients.
+ *
+ * The message contains custom fields, which are to be preserved (via [otherFields]).
+ *
+ * The same class is used regardless of whether the specific message is received from a client, received from a
+ * bridge, sent to a client or sent to a bridge.
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+class EndpointStats : BridgeChannelMessage(TYPE) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    var from: String? = null
+        set(value) {
+            field = value
+            resetJsonCache()
+        }
+
+    @get:JsonAnyGetter
+    val otherFields = mutableMapOf<String, Any>()
+
+    @JsonAnySetter
+    fun put(key: String, value: Any) {
+        otherFields[key] = value
+    }
+
+    companion object {
+        const val TYPE = "EndpointStats"
     }
 }
 
@@ -288,48 +299,13 @@ class ReceiverVideoConstraintMessage(val maxFrameHeight: Int) : BridgeChannelMes
 }
 
 /**
- * A message sent from a client to a bridge, indicating constraints on the streams it wishes to receive. The constraints
- * are expressed as a list of [VideoConstraints], each of which specify the remote endpoint for which the constraint
- * applies and the `idealHeight`.
- *
- * NOTE that the intention is for this message to completely replace the following five messages:
- * [ReceiverVideoConstraintMessage], [PinnedEndpointMessage], [PinnedEndpointsMessage], [SelectedEndpointMessage], and
- * [SelectedEndpointsMessage].
- *
- * This isn't the case currently because that would require substantial changes in the client and instead it was
- * decided to provide a server side compatibility layer.
- *
- * Usage of the above old-world data messages should be avoided in future code.
- *
- * Example Json message:
- *
- * {
- *   "colibriClass": "ReceiverVideoConstraintsChangedEvent",
- *   "videoConstraints": [
- *     { "id": "abcdabcd", "idealHeight": 180 },
- *     { "id": "12341234", "idealHeight": 360 }
- *   ]
- * }
- */
-class ReceiverVideoConstraintsMessage(val videoConstraints: List<VideoConstraints>) : BridgeChannelMessage(TYPE) {
-
-    data class VideoConstraints(val id: String, val idealHeight: Int)
-
-    companion object {
-        const val TYPE = "ReceiverVideoConstraintsChangedEvent"
-    }
-}
-
-/**
  * A message sent from the bridge to a client, indicating that the dominant speaker in the conference changed.
  */
-class DominantSpeakerMessage(var dominantSpeakerEndpoint: String) : BridgeChannelMessage(TYPE) {
-    /**
-     * Serialize manually because it's faster than either Jackson or json-simple.
-     */
-    override fun toJson(): String =
-        """{"colibriClass":"$TYPE","dominantSpeakerEndpoint":"$dominantSpeakerEndpoint"}"""
-
+@JsonInclude(JsonInclude.Include.NON_NULL)
+class DominantSpeakerMessage @JvmOverloads constructor(
+    val dominantSpeakerEndpoint: String,
+    val previousSpeakers: List<String>? = null
+) : BridgeChannelMessage(TYPE) {
     companion object {
         const val TYPE = "DominantSpeakerEndpointChangeEvent"
     }
@@ -348,9 +324,9 @@ class EndpointConnectionStatusMessage(
     val active: String = activeBoolean.toString()
 
     /**
-     * Serialize manually because it's faster than either Jackson or json-simple.
+     * Serialize manually because it's faster than Jackson.
      */
-    override fun toJson(): String =
+    override fun createJson(): String =
         """{"colibriClass":"$TYPE","endpoint":"$endpoint","active":"$active"}"""
 
     companion object {
@@ -360,27 +336,14 @@ class EndpointConnectionStatusMessage(
 
 /**
  * A message sent from the bridge to a client, indicating the set of endpoints that are currently being forwarded.
- *
- * TODO: document the semantics of the fields.
  */
 class ForwardedEndpointsMessage(
     @get:JsonProperty("lastNEndpoints")
-    val forwardedEndpoints: Collection<String>,
-    val endpointsEnteringLastN: Collection<String>,
-    val conferenceEndpoints: Collection<String>
-) : BridgeChannelMessage(TYPE) {
     /**
-     * Serialize using json-simple because it's faster.
+     * The set of endpoints for which the bridge is currently sending video.
      */
-    override fun toJson(): String = JSONObject().apply {
-        this["colibriClass"] = TYPE
-        // json-simple does not property serialize collections properly (it handles [List]s correctly, but not [Set]s)
-        // As a short-term solution force the use of a list.
-        this["lastNEndpoints"] = ArrayList(forwardedEndpoints)
-        this["endpointsEnteringLastN"] = ArrayList(endpointsEnteringLastN)
-        this["conferenceEndpoints"] = ArrayList(conferenceEndpoints)
-    }.toJSONString()
-
+    val forwardedEndpoints: Collection<String>
+) : BridgeChannelMessage(TYPE) {
     companion object {
         const val TYPE = "LastNEndpointsChangeEvent"
     }
@@ -392,11 +355,18 @@ class ForwardedEndpointsMessage(
  * TODO: consider and adjust the format of videoConstraints. Do we need all of the VideoConstraints fields? Document.
  */
 class SenderVideoConstraintsMessage(val videoConstraints: VideoConstraints) : BridgeChannelMessage(TYPE) {
+    constructor(maxHeight: Int) : this(VideoConstraints(maxHeight))
+
     /**
-     * Serialize manually because it's faster than either Jackson or json-simple.
-     * Note that we depend on `VideoConstraints.toString` producing JSON.
+     * Serialize manually because it's faster than Jackson.
+     *
+     * We use the "idealHeight" format that the jitsi-meet client expects.
      */
-    override fun toJson(): String = """{"colibriClass":"$TYPE", "videoConstraints":$videoConstraints}"""
+    override fun createJson(): String =
+        """{"colibriClass":"$TYPE", "videoConstraints":{"idealHeight":${videoConstraints.idealHeight}}}"""
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class VideoConstraints(val idealHeight: Int)
 
     companion object {
         const val TYPE = "SenderVideoConstraints"
@@ -413,9 +383,9 @@ class AddReceiverMessage(
     val videoConstraints: VideoConstraints
 ) : BridgeChannelMessage(TYPE) {
     /**
-     * Serialize manually because it's faster than either Jackson or json-simple.
+     * Serialize manually because it's faster than Jackson.
      */
-    override fun toJson(): String =
+    override fun createJson(): String =
         """{"colibriClass":"$TYPE","bridgeId":"$bridgeId","endpointId":"$endpointId",""" +
             "\"videoConstraints\":$videoConstraints}"
 
@@ -433,12 +403,40 @@ class RemoveReceiverMessage(
     val endpointId: String
 ) : BridgeChannelMessage(TYPE) {
     /**
-     * Serialize manually because it's faster than either Jackson or json-simple.
+     * Serialize manually because it's faster than Jackson.
      */
-    override fun toJson(): String =
+    override fun createJson(): String =
         """{"colibriClass":"$TYPE","bridgeId":"$bridgeId","endpointId":"$endpointId"}"""
 
     companion object {
         const val TYPE = "RemoveReceiver"
+    }
+}
+
+class ReceiverVideoConstraintsMessage(
+    val lastN: Int? = null,
+    val selectedEndpoints: List<String>? = null,
+    val onStageEndpoints: List<String>? = null,
+    val defaultConstraints: VideoConstraints? = null,
+    val constraints: Map<String, VideoConstraints>? = null
+) : BridgeChannelMessage(TYPE) {
+    companion object {
+        const val TYPE = "ReceiverVideoConstraints"
+    }
+}
+
+/**
+ * A signaling the type of video stream an endpoint has available.
+ */
+class VideoTypeMessage(
+    val videoType: VideoType,
+    /**
+     * The endpoint ID that the message relates to, or null. When null, the ID is inferred from the channel the
+     * message was received on (non-null values are needed only for Octo).
+     */
+    val endpointId: String? = null
+) : BridgeChannelMessage(TYPE) {
+    companion object {
+        const val TYPE = "VideoTypeMessage"
     }
 }
