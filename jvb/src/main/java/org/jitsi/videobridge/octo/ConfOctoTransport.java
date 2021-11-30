@@ -225,21 +225,46 @@ public class ConfOctoTransport
                     .filter(r -> !newRelays.containsKey(r))
                     .forEach(this::remoteRelayRemoved);
 
+            Collection<SocketAddress> newBridgeAddresses = newRelays.entrySet().stream()
+                .filter(e -> !remoteBridges.containsKey(e.getKey()))
+                .map(Map.Entry::getValue).collect(Collectors.toList());
+
             if (newRelays.isEmpty())
             {
                 bridgeOctoTransport.removeHandler(conferenceId, this);
             }
-            else if(remoteBridges.isEmpty())
+            else if (remoteBridges.isEmpty())
             {
                 bridgeOctoTransport.addHandler(conferenceId, this);
             }
             remoteBridges = Collections.unmodifiableMap(newRelays);
+
+            if (!newBridgeAddresses.isEmpty())
+            {
+                newRelaysAdded(newBridgeAddresses);
+            }
         }
     }
 
     private void remoteRelayRemoved(String relayId)
     {
         conference.getLocalEndpoints().forEach(e -> e.removeReceiver(relayId));
+    }
+
+    private void newRelaysAdded(Collection<SocketAddress> newBridgeAddresses)
+    {
+        /* Wait a second to make sure the other bridges know about this conference already. */
+        TaskPools.SCHEDULED_POOL.schedule(() ->
+            /* Inform new bridges of existing local endpoints' video types. */
+            conference.getLocalEndpoints().forEach((e) -> {
+                    VideoTypeMessage msg = new VideoTypeMessage(e.getVideoType(), e.getId());
+                    bridgeOctoTransport.sendString(
+                        msg.toJson(),
+                        newBridgeAddresses,
+                        conferenceId
+                    );
+                }
+            ), 1, TimeUnit.SECONDS);
     }
 
     /**
@@ -557,13 +582,13 @@ public class ConfOctoTransport
             debugState.put("packets_received", packetsReceived);
             debugState.put("receive_packet_rate_pps", receivePacketRate.getRate());
             debugState.put("bytes_received", bytesReceived);
-            debugState.put("receive_bitrate_bps", receiveBitRate.getRate());
+            debugState.put("receive_bitrate_bps", receiveBitRate.getRateBps());
             debugState.put("incoming_packets_dropped", incomingPacketsDropped);
 
             debugState.put("packets_sent", packetsSent.sum());
             debugState.put("send_packet_rate_pps", sendPacketRate.getRate());
             debugState.put("bytes_sent", bytesSent.sum());
-            debugState.put("send_bitrate_bps", sendBitRate.getRate());
+            debugState.put("send_bitrate_bps", sendBitRate.getRateBps());
 
             return debugState;
         }

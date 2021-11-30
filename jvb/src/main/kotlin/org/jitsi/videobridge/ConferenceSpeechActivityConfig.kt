@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2021-Present 8x8, Inc
+ * Copyright @ 2021 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.videobridge.shim
+package org.jitsi.videobridge
 
-import org.jivesoftware.smack.packet.StanzaError
-import java.lang.Exception
+import org.jitsi.config.JitsiConfig
+import org.jitsi.metaconfig.config
 
-internal class IqProcessingException(
-    val condition: StanzaError.Condition,
-    message: String
-) : Exception(message) {
-    override fun toString() = "$condition $message"
+class ConferenceSpeechActivityConfig {
+    val recentSpeakersCount: Int by config {
+        "videobridge.speech-activity.recent-speakers-count".from(JitsiConfig.newConfig)
+    }
+
+    companion object {
+        @JvmStatic
+        val config = ConferenceSpeechActivityConfig()
+    }
 }

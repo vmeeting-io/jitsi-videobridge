@@ -24,6 +24,7 @@ import org.jitsi.utils.*;
 import org.jitsi.utils.event.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.queue.*;
+import org.jitsi.utils.stats.*;
 import org.jitsi.utils.version.*;
 import org.jitsi.videobridge.load_management.*;
 import org.jitsi.videobridge.octo.*;
@@ -44,6 +45,7 @@ import org.jxmpp.jid.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import java.util.stream.*;
 
 /**
  * Represents the Jitsi Videobridge which creates, lists and destroys
@@ -125,7 +127,7 @@ public class Videobridge
 
     @NotNull private final ShutdownServiceImpl shutdownService;
 
-    private final EventEmitter<EventHandler> eventEmitter = new EventEmitter<>();
+    private final EventEmitter<EventHandler> eventEmitter = new SyncEventEmitter<>();
 
     static
     {
@@ -241,7 +243,7 @@ public class Videobridge
 
         logger.info(() -> "create_conf, id=" + conference.getID() + " gid=" + conference.getGid());
 
-        eventEmitter.fireEventSync(handler ->
+        eventEmitter.fireEvent(handler ->
         {
             handler.conferenceCreated(conference);
             return Unit.INSTANCE;
@@ -283,7 +285,7 @@ public class Videobridge
             {
                 conferencesById.remove(id);
                 conference.expire();
-                eventEmitter.fireEventSync(handler ->
+                eventEmitter.fireEvent(handler ->
                 {
                     handler.conferenceExpired(conference);
                     return Unit.INSTANCE;
@@ -359,7 +361,7 @@ public class Videobridge
         {
             return IQUtils.createError(
                     conferenceIq,
-                    XMPPError.Condition.bad_request,
+                    StanzaError.Condition.bad_request,
                     "Conference not found for ID: " + conferenceIq.getID());
         }
         catch (InGracefulShutdownException e)
@@ -386,7 +388,7 @@ public class Videobridge
             request.getCallback().invoke(
                     IQUtils.createError(
                             conferenceIq,
-                            XMPPError.Condition.bad_request,
+                            StanzaError.Condition.bad_request,
                             "Conference not found for ID: " + conferenceIq.getID()));
             return;
         }
@@ -434,8 +436,8 @@ public class Videobridge
      * @param healthCheckIQ the <tt>HealthCheckIQ</tt> to be handled.
      * @return IQ with &quot;result&quot; type if the health check succeeded or
      * IQ with &quot;error&quot; type if something went wrong.
-     * {@link XMPPError.Condition#internal_server_error} is returned when the
-     * health check fails or {@link XMPPError.Condition#not_authorized} if the
+     * {@link StanzaError.Condition#internal_server_error} is returned when the
+     * health check fails or {@link StanzaError.Condition#not_authorized} if the
      * request comes from a JID that is not authorized to do health checks on
      * this instance.
      */
@@ -451,7 +453,7 @@ public class Videobridge
             return
                 IQUtils.createError(
                         healthCheckIQ,
-                        XMPPError.Condition.internal_server_error,
+                        StanzaError.Condition.internal_server_error,
                         e.getMessage());
         }
     }
@@ -658,6 +660,10 @@ public class Videobridge
             "rtp_sender_queue",
             getJsonFromQueueStatisticsAndErrorHandler(RtpSenderImpl.Companion.getQueueErrorCounter(),
                 "rtp-sender-incoming-packet-queue"));
+        queueStats.put(
+            "colibri_queue",
+            QueueStatistics.Companion.getStatistics().get("colibri-queue")
+        );
 
         queueStats.put(
             AbstractEndpointMessageTransport.INCOMING_MESSAGE_QUEUE_ID,
@@ -746,6 +752,13 @@ public class Videobridge
      */
     public static class Statistics
     {
+        /**
+         * The total number of times our AIMDs have expired the incoming bitrate
+         * (and which would otherwise result in video suspension).
+         * (see {@link AimdRateControl#incomingBitrateExpirations}).
+         */
+        public AtomicInteger incomingBitrateExpirations = new AtomicInteger(0);
+
         /**
          * The cumulative/total number of conferences that had all of their
          * channels failed because there was no transport activity (which
@@ -900,6 +913,17 @@ public class Videobridge
          * The stress level for this bridge
          */
         public Double stressLevel = 0.0;
+
+        /** Distribution of energy scores for discarded audio packets  */
+        public BucketStats tossedPacketsEnergy = new BucketStats(
+                LongStream.range(1, 16).map(w -> 8 * w - 1).toArray(), "", "");
+
+        /** Number of preemptive keyframe requests that were sent. */
+        public AtomicInteger preemptiveKeyframeRequestsSent = new AtomicInteger();
+
+        /** Number of preemptive keyframe requests that were not sent because no endpoints were in stage view. */
+        public AtomicInteger preemptiveKeyframeRequestsSuppressed = new AtomicInteger();
+
     }
 
     public interface EventHandler {

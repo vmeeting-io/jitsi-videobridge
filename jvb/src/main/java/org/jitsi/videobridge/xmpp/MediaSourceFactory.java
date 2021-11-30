@@ -21,6 +21,7 @@ import org.jitsi.utils.logging2.*;
 import org.jitsi.xmpp.extensions.colibri.*;
 import org.jitsi.xmpp.extensions.jingle.*;
 import org.jitsi.xmpp.extensions.jitsimeet.*;
+import org.jivesoftware.smack.packet.*;
 import org.jxmpp.jid.parts.*;
 import org.jxmpp.util.*;
 
@@ -394,11 +395,12 @@ public class MediaSourceFactory
             });
         });
 
-        if (!sourceGroupsCopy.isEmpty()) {
+        if (!sourceGroupsCopy.isEmpty())
+        {
             logger.warn(
                 "Unprocessed source groups: " +
                     sourceGroupsCopy.stream()
-                        .map(SourceGroupPacketExtension::toXML)
+                        .map(e -> e.toXML(XmlEnvironment.EMPTY))
                         .reduce(String::concat));
         }
 

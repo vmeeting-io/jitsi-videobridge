@@ -17,10 +17,12 @@ package org.jitsi.videobridge;
 
 import org.jetbrains.annotations.*;
 import org.jitsi.nlj.*;
+import org.jitsi.nlj.rtp.*;
 import org.jitsi.rtp.Packet;
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.*;
 import org.jitsi.rtp.rtp.*;
 import org.jitsi.utils.collections.*;
+import org.jitsi.utils.dsi.*;
 import org.jitsi.utils.logging.*;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.logging2.LoggerImpl;
@@ -39,6 +41,7 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import java.util.stream.*;
 
 import static org.jitsi.utils.collections.JMap.*;
 
@@ -241,7 +244,7 @@ public class Conference
         {
             DiagnosticContext diagnosticContext = new DiagnosticContext();
             diagnosticContext.put("conf_id", (gid == GID_NOT_SET)? id : gid);
-            diagnosticContext.put("conf_name", conferenceName);
+            diagnosticContext.put("conf_name", conferenceName.toString());
             diagnosticContext.put("conf_creation_time_ms", creationTime);
             return diagnosticContext;
         }
@@ -412,43 +415,69 @@ public class Conference
     /**
      * Notifies this instance that {@link #speechActivity} has identified a speaker switch event and there is now a new
      * dominant speaker.
+     * @param recentSpeakers the list of recent speakers (including the dominant speaker at index 0).
      */
-    private void dominantSpeakerChanged()
+    private void recentSpeakersChanged(List<AbstractEndpoint> recentSpeakers, boolean dominantSpeakerChanged)
     {
-        AbstractEndpoint dominantSpeaker = speechActivity.getDominantEndpoint();
-        String dominantSpeakerId = dominantSpeaker == null ? null : dominantSpeaker.getId();
-
+        List<String> recentSpeakersIds
+                = recentSpeakers.stream().map(AbstractEndpoint::getId).collect(Collectors.toList());
         if (logger.isInfoEnabled())
         {
-            logger.info("ds_change ds_id=" + dominantSpeakerId);
+            logger.info("Recent speakers changed: " + recentSpeakersIds);
             getVideobridge().getStatistics().totalDominantSpeakerChanges.increment();
         }
+        broadcastMessage(new DominantSpeakerMessage(recentSpeakersIds));
 
-        if (dominantSpeaker != null)
+        if (dominantSpeakerChanged && getEndpointCount() > 2)
         {
-            broadcastMessage(
-                    new DominantSpeakerMessage(
-                            dominantSpeakerId,
-                            speechActivity.getRecentSpeakers()));
-            if (getEndpointCount() > 2)
+            maybeSendKeyframeRequest(recentSpeakers.get(0));
+        }
+    }
+
+    /**
+     * Schedules sending a pre-emptive keyframe request (if necessay) when a neww dominant speaker is elected.
+     * @param dominantSpeaker the new dominant speaker.
+     */
+    private void maybeSendKeyframeRequest(AbstractEndpoint dominantSpeaker)
+    {
+        if (dominantSpeaker == null)
+        {
+            return;
+        }
+
+        boolean anyEndpointInStageView = false;
+        for (Endpoint otherEndpoint : getLocalEndpoints())
+        {
+            if (otherEndpoint != dominantSpeaker && otherEndpoint.isInStageView())
             {
-                double senderRtt = getRtt(dominantSpeaker);
-                double maxReceiveRtt = getMaxReceiverRtt(dominantSpeakerId);
-                // We add an additional 10ms delay to reduce the risk of the keyframe arriving
-                // too early
-                double keyframeDelay = maxReceiveRtt - senderRtt + 10;
-                if (logger.isDebugEnabled())
-                {
-                    logger.debug("Scheduling keyframe request from " + dominantSpeakerId + " after a delay" +
-                            " of " + keyframeDelay + "ms");
-                }
-                TaskPools.SCHEDULED_POOL.schedule(
-                        (Runnable)dominantSpeaker::requestKeyframe,
-                        (long)keyframeDelay,
-                        TimeUnit.MILLISECONDS
-                );
+                anyEndpointInStageView = true;
+                break;
             }
         }
+
+        if (!anyEndpointInStageView)
+        {
+            // If all other endpoints are in tile view, there is no switch to anticipate. Don't trigger an unnecessary
+            // keyframe.
+            getVideobridge().getStatistics().preemptiveKeyframeRequestsSuppressed.incrementAndGet();
+            return;
+        }
+        getVideobridge().getStatistics().preemptiveKeyframeRequestsSent.incrementAndGet();
+
+        double senderRtt = getRtt(dominantSpeaker);
+        double maxReceiveRtt = getMaxReceiverRtt(dominantSpeaker.getId());
+        // We add an additional 10ms delay to reduce the risk of the keyframe arriving too early
+        double keyframeDelay = maxReceiveRtt - senderRtt + 10;
+        if (logger.isDebugEnabled())
+        {
+            logger.debug("Scheduling keyframe request from " + dominantSpeaker.getId() + " after a delay" +
+                    " of " + keyframeDelay + "ms");
+        }
+        TaskPools.SCHEDULED_POOL.schedule(
+                (Runnable)dominantSpeaker::requestKeyframe,
+                (long)keyframeDelay,
+                TimeUnit.MILLISECONDS
+        );
     }
 
     private double getRtt(AbstractEndpoint endpoint)
@@ -492,7 +521,8 @@ public class Conference
      */
     void expire()
     {
-        if (!expired.compareAndSet(false, true)) {
+        if (!expired.compareAndSet(false, true))
+        {
             return;
         }
 
@@ -882,22 +912,17 @@ public class Conference
 
         if (!isExpired())
         {
-            AbstractEndpoint dominantSpeaker = speechActivity.getDominantEndpoint();
+            List<String> recentSpeakers = speechActivity.getRecentSpeakers();
 
-            if (dominantSpeaker != null)
+            if (!recentSpeakers.isEmpty())
             {
                 try
                 {
-                    endpoint.sendMessage(
-                            new DominantSpeakerMessage(
-                                    dominantSpeaker.getId(),
-                                    speechActivity.getRecentSpeakers()));
+                    endpoint.sendMessage(new DominantSpeakerMessage(speechActivity.getRecentSpeakers()));
                 }
                 catch (IOException e)
                 {
-                    logger.error(
-                            "Failed to send dominant speaker update on data channel to " + endpoint.getId(),
-                            e);
+                    logger.error("Failed to send dominant speaker update on data channel to " + endpoint.getId(), e);
                 }
             }
         }
@@ -950,6 +975,36 @@ public class Conference
     }
 
     /**
+     * Determine whether to forward an audio packet.
+     * @param sourceEndpointId the source endpoint.
+     * @return whether to forward the packet.
+     */
+    private boolean shouldSendAudio(String sourceEndpointId)
+    {
+        DominantSpeakerIdentification<String>.SpeakerRanking ranking = speechActivity.getRanking(sourceEndpointId);
+        if (ranking.isDominant && LoudestConfig.Companion.getAlwaysRouteDominant())
+            return true;
+        if (ranking.energyRanking < LoudestConfig.Companion.getNumLoudest())
+            return true;
+        videobridge.getStatistics().tossedPacketsEnergy.addValue(ranking.energyScore);
+        return false;
+    }
+
+    /**
+     * Determine whether a given endpointId is currently a ranked speaker, if
+     * speaker ranking is currently enabled.
+     */
+    public boolean isRankedSpeaker(AbstractEndpoint ep)
+    {
+        if (!LoudestConfig.Companion.getRouteLoudestOnly())
+        {
+            return false;
+        }
+        DominantSpeakerIdentification<String>.SpeakerRanking ranking = speechActivity.getRanking(ep.getId());
+        return ranking.energyRanking < LoudestConfig.Companion.getNumLoudest();
+    }
+
+    /**
      * Broadcasts the packet to all endpoints and tentacles that want it.
      *
      * @param packetInfo the packet
@@ -963,29 +1018,36 @@ public class Conference
         // is also interested in the packet.  We'll give the last handler the
         // original packet (without cloning).
         PotentialPacketHandler prevHandler = null;
-        for (Endpoint endpoint : endpointsCache)
-        {
-            if (endpoint.getId().equals(sourceEndpointId))
-            {
-                continue;
-            }
 
-            if (endpoint.wants(packetInfo))
+        boolean discard = LoudestConfig.Companion.getRouteLoudestOnly()
+            && packetInfo.getPacket() instanceof AudioRtpPacket
+            && !shouldSendAudio(sourceEndpointId);
+        if (!discard)
+        {
+            for (Endpoint endpoint : endpointsCache)
+            {
+                if (endpoint.getId().equals(sourceEndpointId))
+                {
+                    continue;
+                }
+
+                if (endpoint.wants(packetInfo))
+                {
+                    if (prevHandler != null)
+                    {
+                        prevHandler.send(packetInfo.clone());
+                    }
+                    prevHandler = endpoint;
+                }
+            }
+            if (tentacle != null && tentacle.wants(packetInfo))
             {
                 if (prevHandler != null)
                 {
                     prevHandler.send(packetInfo.clone());
                 }
-                prevHandler = endpoint;
+                prevHandler = tentacle;
             }
-        }
-        if (tentacle != null && tentacle.wants(packetInfo))
-        {
-            if (prevHandler != null)
-            {
-                prevHandler.send(packetInfo.clone());
-            }
-            prevHandler = tentacle;
         }
 
         if (prevHandler != null)
@@ -1273,9 +1335,9 @@ public class Conference
     private class SpeechActivityListener implements ConferenceSpeechActivity.Listener
     {
         @Override
-        public void dominantSpeakerChanged()
+        public void recentSpeakersChanged(List<AbstractEndpoint> recentSpeakers, boolean dominantSpeakerChanged)
         {
-            Conference.this.dominantSpeakerChanged();
+            Conference.this.recentSpeakersChanged(recentSpeakers, dominantSpeakerChanged);
         }
 
         @Override

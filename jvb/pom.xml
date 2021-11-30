@@ -102,7 +102,7 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>sctp</artifactId>
-      <version>1.0-4-g97f4e5e</version>
+      <version>1.0-8-g04269a7</version>
     </dependency>
     <!-- https://mvnrepository.com/artifact/org.slf4j/slf4j-api -->
     <!-- we inherit an old version of slf4j-api from tinder, which pcap4j doesn't work with. Adding slf4j-api 1.7.30 (the current stable) as a dep of jvb fixes the problem. -->
@@ -169,7 +169,14 @@
     <dependency>
       <groupId>com.fasterxml.jackson.module</groupId>
       <artifactId>jackson-module-kotlin</artifactId>
-      <version>2.12.3</version>
+      <version>${jackson.version}</version>
+    </dependency>
+    <!-- jackson-module-kotlin uses kotlin-reflect; avoid pulling
+         in an old version. -->
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-reflect</artifactId>
+      <version>${kotlin.version}</version>
     </dependency>
     <dependency>
       <groupId>org.reflections</groupId>
@@ -194,39 +201,6 @@
       <groupId>io.mockk</groupId>
       <artifactId>mockk</artifactId>
       <version>1.10.2</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.mockito</groupId>
-      <artifactId>mockito-core</artifactId>
-      <version>3.3.3</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.easymock</groupId>
-      <artifactId>easymock</artifactId>
-      <version>4.0.2</version>
-      <scope>test</scope>
-    </dependency>
-    <!-- https://mvnrepository.com/artifact/org.powermock/powermock-core -->
-    <dependency>
-      <groupId>org.powermock</groupId>
-      <artifactId>powermock-core</artifactId>
-      <version>2.0.6</version>
-      <scope>test</scope>
-    </dependency>
-    <!-- https://mvnrepository.com/artifact/org.powermock/powermock-api-easymock -->
-    <dependency>
-      <groupId>org.powermock</groupId>
-      <artifactId>powermock-api-easymock</artifactId>
-      <version>2.0.6</version>
-      <scope>test</scope>
-    </dependency>
-    <!-- https://mvnrepository.com/artifact/org.powermock/powermock-module-junit4 -->
-    <dependency>
-      <groupId>org.powermock</groupId>
-      <artifactId>powermock-module-junit4</artifactId>
-      <version>2.0.6</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -268,12 +242,6 @@
     <dependency>
         <groupId>io.kotest</groupId>
         <artifactId>kotest-assertions-core-jvm</artifactId>
-        <version>${kotest.version}</version>
-        <scope>test</scope>
-    </dependency>
-    <dependency>
-        <groupId>io.kotest</groupId>
-        <artifactId>kotest-runner-console-jvm</artifactId>
         <version>${kotest.version}</version>
         <scope>test</scope>
     </dependency>
@@ -491,6 +459,21 @@
         <version>2.22.2</version>
       </plugin>
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>3.1.1</version>
+        <configuration>
+          <configLocation>checkstyle.xml</configLocation>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
         <groupId>com.github.spotbugs</groupId>
         <artifactId>spotbugs-maven-plugin</artifactId>
         <version>4.0.0</version>
@@ -548,7 +531,7 @@
           <dependency>
             <groupId>com.pinterest</groupId>
             <artifactId>ktlint</artifactId>
-            <version>0.39.0</version>
+            <version>0.41.0</version>
           </dependency>
           <!-- additional 3rd party ruleset(s) can be specified here -->
         </dependencies>

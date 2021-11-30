@@ -57,23 +57,20 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
             return true;
         }
 
-        long deltaBwe = currentBwe - previousBwe;
-
-        // If the bwe has increased, we should act upon it, otherwise we may end up in this broken situation: Suppose
-        // that the target bitrate is 2.5Mbps, and that the last bandwidth allocation was performed with a 2.4Mbps
-        // bandwidth estimate.  The bridge keeps probing and, suppose that, eventually the bandwidth estimate reaches
-        // 2.6Mbps, which is plenty to accommodate the target bitrate; but the minimum bandwidth estimate that would
-        // trigger a new bandwidth allocation is 2.4Mbps + 2.4Mbps * 15% = 2.76Mbps.
-        if (deltaBwe > 0)
-        {
-            return true;
-        }
+        // We supress re-allocation when BWE has changed less than 15% (by default) of its previous value in order to
+        // prevent excessive changes during ramp-up.
+        // When BWE increases it should eventually increase past the threshold because of probing.
+        // When BWE decreases it is probably above the threshold because of AIMD. It's not clear to me whether we need
+        // the threshold in this case.
+        // In any case, there are other triggers for re-allocation, so any suppression we do here will only last up to
+        // a few seconds.
+        long deltaBwe = Math.abs(currentBwe - previousBwe);
+        return deltaBwe > previousBwe * BitrateControllerConfig.bweChangeThreshold();
 
         // If, on the other hand, the bwe has decreased, we require at least a 15% drop in order to update the bitrate
         // allocation. This is an ugly hack to prevent too many resolution/UI changes in case the bridge produces too
         // low bandwidth estimate, at the risk of clogging the receiver's pipe.
         // TODO: do we still need this? Do we ever ever see BWE drop by <%15?
-        return deltaBwe < -1 * previousBwe * BitrateControllerConfig.bweChangeThreshold();
     }
 
     private final Logger logger;
@@ -102,7 +99,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
 
     private final Clock clock;
 
-    private final EventEmitter<EventHandler> eventEmitter = new EventEmitter<>();
+    private final EventEmitter<EventHandler> eventEmitter = new SyncEventEmitter<>();
 
     /**
      * Whether bandwidth allocation should be constrained to the available bandwidth (when {@code true}), or assume
@@ -155,8 +152,9 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
     JSONObject getDebugState()
     {
         JSONObject debugState = new JSONObject();
-        debugState.put("trustBwe", BitrateControllerConfig.trustBwe());
+        debugState.put("trustBwe", trustBwe.get());
         debugState.put("bweBps", bweBps);
+        debugState.put("allocation", allocation.getDebugState());
         debugState.put("allocationSettings", allocationSettings.toJson());
         debugState.put("effectiveConstraints", effectiveConstraints);
         return debugState;
@@ -237,7 +235,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
         boolean allocationChanged = !allocation.isTheSameAs(newAllocation);
         if (allocationChanged)
         {
-            eventEmitter.fireEventSync(handler -> {
+            eventEmitter.fireEvent(handler -> {
                 handler.allocationChanged(newAllocation);
                 return Unit.INSTANCE;
             });
@@ -249,7 +247,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
                 + " effectiveConstraintsChanged=" + effectiveConstraintsChanged);
         if (effectiveConstraintsChanged)
         {
-            eventEmitter.fireEventSync(handler ->
+            eventEmitter.fireEvent(handler ->
             {
                 handler.effectiveVideoConstraintsChanged(oldEffectiveConstraints, effectiveConstraints);
                 return Unit.INSTANCE;
@@ -286,92 +284,59 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
             return new BandwidthAllocation(Collections.emptySet());
         }
 
-        long maxBandwidth = getAvailableBandwidth();
-        long oldMaxBandwidth = -1;
-
-        int[] oldTargetIndices = new int[sourceBitrateAllocations.size()];
-        int[] newTargetIndices = new int[sourceBitrateAllocations.size()];
-        Arrays.fill(newTargetIndices, -1);
-
-        // The number of allocations with a selected layer.
-        int numAllocationsWithVideo = 0;
+        long remainingBandwidth = getAvailableBandwidth();
+        long oldRemainingBandwidth = -1;
 
         boolean oversending = false;
-        while (oldMaxBandwidth != maxBandwidth)
+        while (oldRemainingBandwidth != remainingBandwidth && remainingBandwidth > 0)
         {
-            oldMaxBandwidth = maxBandwidth;
-            System.arraycopy(newTargetIndices, 0, oldTargetIndices, 0, oldTargetIndices.length);
+            oldRemainingBandwidth = remainingBandwidth;
 
-            int newNumAllocationsWithVideo = 0;
             for (int i = 0; i < sourceBitrateAllocations.size(); i++)
             {
                 SingleSourceAllocation sourceBitrateAllocation = sourceBitrateAllocations.get(i);
-
-                if (sourceBitrateAllocation.constraints.getMaxHeight() <= 0)
+                if (sourceBitrateAllocation.getConstraints().getMaxHeight() <= 0)
                 {
                     continue;
                 }
 
-                maxBandwidth += sourceBitrateAllocation.getTargetBitrate();
                 // In stage view improve greedily until preferred, in tile view go step-by-step.
-                sourceBitrateAllocation.improve(maxBandwidth);
-                if (i == 0
-                        && sourceBitrateAllocation.isOnStage()
-                        && BitrateControllerConfig.allowOversendOnStage()
-                        && sourceBitrateAllocation.endpoint.getVideoType() == VideoType.DESKTOP)
+                remainingBandwidth -= sourceBitrateAllocation.improve(remainingBandwidth, i == 0);
+                if (remainingBandwidth < 0)
                 {
-                    oversending |= sourceBitrateAllocation.tryLowestLayer();
-                }
-
-                // allocate at least the lowest layer to prevent the video to be turnoff due to insufficient bandwidth.
-                // mitigate the overload by setting the constraints to min of 180p/1fps
-                oversending |= sourceBitrateAllocation.tryLowestLayer();
-
-                maxBandwidth -= sourceBitrateAllocation.getTargetBitrate();
-
-                newTargetIndices[i] = sourceBitrateAllocation.targetIdx;
-                if (sourceBitrateAllocation.targetIdx != -1)
-                {
-                    newNumAllocationsWithVideo++;
+                    oversending = true;
                 }
 
                 // In stage view, do not allocate bandwidth for thumbnails until the on-stage reaches "preferred".
                 // This prevents enabling thumbnail only to disable them when bwe slightly increases allowing on-stage
                 // to take more.
-                if (sourceBitrateAllocation.isOnStage() &&
-                        sourceBitrateAllocation.targetIdx < sourceBitrateAllocation.preferredIdx)
-                {
-                    break;
-                }
+                // Tu: comment out it so that we always has at least one layer, even at the cost of oversending
+                // if (sourceBitrateAllocation.isOnStage() && !sourceBitrateAllocation.hasReachedPreferred())
+                // {
+                //     break;
+                // }
             }
-
-            if (numAllocationsWithVideo > newNumAllocationsWithVideo)
-            {
-                // rollback state to prevent jumps in the number of forwarded participants.
-                for (int i = 0; i < sourceBitrateAllocations.size(); i++)
-                {
-                    sourceBitrateAllocations.get(i).targetIdx = oldTargetIndices[i];
-                }
-
-                break;
-            }
-
-            numAllocationsWithVideo = newNumAllocationsWithVideo;
         }
 
         // The endpoints which are in lastN, and are sending video, but were suspended due to bwe.
         List<String> suspendedIds = sourceBitrateAllocations.stream()
                 .filter(SingleSourceAllocation::isSuspended)
-                .map(ssa -> ssa.endpoint.getId()).collect(Collectors.toList());
+                .map(ssa -> ssa.getEndpoint().getId()).collect(Collectors.toList());
         if (!suspendedIds.isEmpty())
         {
             logger.info("Endpoints were suspended due to insufficient bandwidth (bwe="
                     + getAvailableBandwidth() + " bps): " + String.join(",", suspendedIds));
         }
 
-        return new BandwidthAllocation(
-                sourceBitrateAllocations.stream().map(SingleSourceAllocation::getResult).collect(Collectors.toSet()),
-                oversending);
+        Set<SingleAllocation> allocations = new HashSet<>();
+
+        long targetBps = 0, idealBps = 0;
+        for (SingleSourceAllocation sourceBitrateAllocation : sourceBitrateAllocations) {
+            allocations.add(sourceBitrateAllocation.getResult());
+            targetBps += sourceBitrateAllocation.getTargetBitrate();
+            idealBps += sourceBitrateAllocation.getIdealBitrate();
+        }
+        return new BandwidthAllocation(allocations, oversending, idealBps, targetBps);
     }
 
     /**
@@ -381,6 +346,19 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
     public boolean isForwarding(String endpointId)
     {
         return allocation.isForwarding(endpointId);
+    }
+
+    /**
+     * Query whether the allocator has non-zero effective constraints for the given endpoint.
+     */
+    public boolean hasNonZeroEffectiveConstraints(String endpointId)
+    {
+        VideoConstraints constraints = effectiveConstraints.get(endpointId);
+        if (constraints == null)
+        {
+            return false;
+        }
+        return constraints.getMaxHeight() > 0;
     }
 
     private synchronized @NotNull List<SingleSourceAllocation> createAllocations(List<T> conferenceEndpoints)

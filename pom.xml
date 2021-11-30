@@ -24,13 +24,14 @@
 
     <properties>
         <jetty.version>9.4.40.v20210413</jetty.version>
-        <kotlin.version>1.3.72</kotlin.version>
-        <kotest.version>4.1.3</kotest.version>
-        <jicoco.version>1.1-84-g1d06d1f</jicoco.version>
-        <jitsi.utils.version>1.0-89-g938d2dc</jitsi.utils.version>
+        <kotlin.version>1.5.20</kotlin.version>
+        <kotest.version>4.6.1</kotest.version>
+        <jicoco.version>1.1-95-gd8fd866</jicoco.version>
+        <jitsi.utils.version>1.0-97-g67c980b</jitsi.utils.version>
         <maven-shade-plugin.version>3.2.2</maven-shade-plugin.version>
         <spotbugs.version>4.1.4</spotbugs.version>
         <jersey.version>2.34</jersey.version>
+        <jackson.version>2.12.4</jackson.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
@@ -95,17 +96,17 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>ice4j</artifactId>
-                <version>3.0-30-g2586d8b</version>
+                <version>3.0-35-gadca67b</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>rtp</artifactId>
-                <version>1.0-54-ge0d663c</version>
+                <version>1.0-64-g6932ded</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>jitsi-xmpp-extensions</artifactId>
-                <version>1.0-23-gd305889</version>
+                <version>1.0-26-g67e8beb</version>
             </dependency>
             <dependency>
                 <groupId>${project.groupId}</groupId>
@@ -125,7 +126,7 @@
         <profile>
             <id>coverage</id>
             <properties>
-                <jacoco.version>0.8.6</jacoco.version>
+                <jacoco.version>0.8.7</jacoco.version>
             </properties>
             <build>
                 <plugins>

@@ -72,9 +72,9 @@ public class ConferenceShim
         this.logger = parentLogger.createChildLogger(ConferenceShim.class.getName());
         this.conference = conference;
         colibriQueue = new PacketQueue<>(
-                100,
+                Integer.MAX_VALUE,
                 true,
-                "colibri-queue-" + conference.getID(),
+                "colibri-queue",
                 request ->
                 {
                     try
@@ -99,7 +99,7 @@ public class ConferenceShim
                         request.getCallback().invoke(
                                 IQUtils.createError(
                                         request.getRequest(),
-                                        XMPPError.Condition.internal_server_error,
+                                        StanzaError.Condition.internal_server_error,
                                         e.getMessage()));
                     }
                     return true;
@@ -172,19 +172,6 @@ public class ConferenceShim
                 iq.addChannelBundle(responseBundleIQ);
             }
         }
-    }
-
-    /**
-     * Adds the endpoint of this <tt>Conference</tt> as
-     * <tt>ColibriConferenceIQ.Endpoint</tt> instances in <tt>iq</tt>.
-     * @param iq the <tt>ColibriConferenceIQ</tt> in which to describe.
-     */
-    void describeEndpoints(ColibriConferenceIQ iq)
-    {
-        conference.getEndpoints().forEach(
-                en -> iq.addEndpoint(
-                        new ColibriConferenceIQ.Endpoint(
-                                en.getId(), en.getStatsId(), en.getDisplayName())));
     }
 
     /**
@@ -388,7 +375,6 @@ public class ConferenceShim
 
             if (endpoint != null)
             {
-                endpoint.setDisplayName(colibriEndpoint.getDisplayName());
                 endpoint.setStatsId(colibriEndpoint.getStatsId());
             }
         }
@@ -430,7 +416,7 @@ public class ConferenceShim
             {
                 return IQUtils.createError(
                         conferenceIQ,
-                        XMPPError.Condition.internal_server_error,
+                        StanzaError.Condition.internal_server_error,
                         "Failed to create new content for type: " + contentType);
             }
 
@@ -447,9 +433,12 @@ public class ConferenceShim
             {
                 // Item not found conditions are assumed to be less critical, as they often happen in case a request
                 // arrives late for an expired endpoint.
-                if (XMPPError.Condition.item_not_found.equals(e.getCondition())) {
+                if (StanzaError.Condition.item_not_found.equals(e.getCondition()))
+                {
                     logger.warn("Error processing channels: " + e);
-                } else {
+                }
+                else
+                {
                     logger.error("Error processing channels: " + e);
                 }
                 return IQUtils.createError(conferenceIQ, e.getCondition(), e.getMessage());
@@ -491,7 +480,7 @@ public class ConferenceShim
             {
                 return IQUtils.createError(
                         conferenceIQ,
-                        XMPPError.Condition.bad_request,
+                        StanzaError.Condition.bad_request,
                         "Can not enable octo without a valid GID.");
             }
 
@@ -503,7 +492,7 @@ public class ConferenceShim
             logger.error("Octo must be enabled for audio and video together");
             return IQUtils.createError(
                     conferenceIQ,
-                    XMPPError.Condition.bad_request,
+                    StanzaError.Condition.bad_request,
                     "Octo only enabled for one media type");
         }
 
@@ -535,8 +524,6 @@ public class ConferenceShim
         {
             updateEndpoint(colibriEndpoint);
         }
-
-        describeEndpoints(responseConferenceIQ);
 
         responseConferenceIQ.setType(IQ.Type.result);
 
