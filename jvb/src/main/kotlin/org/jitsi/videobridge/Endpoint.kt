@@ -18,12 +18,7 @@ package org.jitsi.videobridge
 
 import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
-import org.jitsi.nlj.Features
-import org.jitsi.nlj.MediaSourceDesc
-import org.jitsi.nlj.PacketHandler
-import org.jitsi.nlj.PacketInfo
-import org.jitsi.nlj.Transceiver
-import org.jitsi.nlj.TransceiverEventHandler
+import org.jitsi.nlj.*
 import org.jitsi.nlj.format.PayloadType
 import org.jitsi.nlj.rtp.AudioRtpPacket
 import org.jitsi.nlj.rtp.RtpExtension
@@ -33,12 +28,7 @@ import org.jitsi.nlj.srtp.TlsRole
 import org.jitsi.nlj.stats.EndpointConnectionStats
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.ConsumerNode
-import org.jitsi.nlj.util.Bandwidth
-import org.jitsi.nlj.util.LocalSsrcAssociation
-import org.jitsi.nlj.util.NEVER
-import org.jitsi.nlj.util.PacketInfoQueue
-import org.jitsi.nlj.util.RemoteSsrcAssociation
-import org.jitsi.nlj.util.sumOf
+import org.jitsi.nlj.util.*
 import org.jitsi.rtp.Packet
 import org.jitsi.rtp.UnparsedPacket
 import org.jitsi.rtp.rtcp.RtcpSrPacket
@@ -88,11 +78,12 @@ import java.nio.ByteBuffer
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import java.util.Optional
+import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Supplier
+
 
 /**
  * Models a local endpoint (participant) in a [Conference]
@@ -123,6 +114,11 @@ class Endpoint @JvmOverloads constructor(
 
     private val diagnosticContext = conference.newDiagnosticContext().apply {
         put("endpoint_id", id)
+        put("getBitrateStatsFunc", this@Endpoint::getBitrateStats)
+    }
+
+    fun getBitrateStats(): Array<Long> {
+        return arrayOf(bitrateController.bandwidthAllocator.allocation.idealBps, bitrateController.bandwidthAllocator.allocation.targetBps)
     }
 
     private val timelineLogger = logger.createChildLogger("timeline.${this.javaClass.name}")

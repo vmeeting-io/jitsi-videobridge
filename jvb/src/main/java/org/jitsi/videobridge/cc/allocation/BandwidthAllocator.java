@@ -171,7 +171,7 @@ public class BandwidthAllocator<T extends MediaSourceContainer>
     }
 
     @NotNull
-    BandwidthAllocation getAllocation()
+    public BandwidthAllocation getAllocation()
     {
         return allocation;
     }
