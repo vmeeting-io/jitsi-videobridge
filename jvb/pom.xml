@@ -294,16 +294,18 @@
              <phase>package</phase>
              <goals>
                <goal>single</goal>
-             </goals>
+            </goals>
              <configuration>
-               <appendAssemblyId>true</appendAssemblyId>
+               <appendAssemblyId>
+                true</appendAssemblyId>
                <descriptors>
                  <descriptor>src/assembly/archive.xml</descriptor>
-               </descriptors>
-               <skipAssembly>${assembly.skipAssembly}</skipAssembly>
-             </configuration>
-           </execution>
-         </executions>
+              </descriptors>
+               <skipAssembly>
+                ${assembly.skipAssembly}</skipAssembly>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -320,7 +322,8 @@
             -->
             <phase>none</phase>
             <configuration>
-              <finalName>${project.name}-${project.version}-jar-with-dependencies</finalName>
+              <finalName>
+                ${project.name}-${project.version}-jar-with-dependencies</finalName>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
                   <resource>reference.conf</resource>
@@ -328,7 +331,8 @@
               </transformers>
               <filters>
                 <filter>
-                  <artifact>*:*</artifact>
+                  <artifact>
+                    *:*</artifact>
                   <!-- Exclude signatures as they don't work correctly with a
                        fat jar.
                   -->
@@ -354,12 +358,15 @@
               <goal>exec</goal>
             </goals>
             <configuration>
-              <executable>java</executable>
+              <executable>
+                java</executable>
               <arguments>
                 <argument>-classpath</argument>
-                <classpath/>
-                <argument>-Djava.util.logging.config.file=${project.basedir}/lib/logging.properties</argument>
-                <argument>${exec.mainClass}</argument>
+                <classpath />
+                <argument>
+                  -Djava.util.logging.config.file=${project.basedir}/lib/logging.properties</argument>
+                <argument>
+                  ${exec.mainClass}</argument>
               </arguments>
             </configuration>
           </execution>
@@ -369,7 +376,8 @@
               <goal>java</goal>
             </goals>
             <configuration>
-              <mainClass>${exec.mainClass}</mainClass>
+              <mainClass>
+                ${exec.mainClass}</mainClass>
             </configuration>
           </execution>
         </executions>
@@ -392,7 +400,8 @@
             </goals>
             <configuration>
               <sourceDirs>
-                <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
+                <sourceDir>
+                  ${project.basedir}/src/main/kotlin</sourceDir>
                 <sourceDir>${project.basedir}/src/main/java</sourceDir>
               </sourceDirs>
             </configuration>
@@ -405,14 +414,16 @@
             </goals>
             <configuration>
               <sourceDirs>
-                <sourceDir>${project.basedir}/src/test/kotlin</sourceDir>
+                <sourceDir>
+                  ${project.basedir}/src/test/kotlin</sourceDir>
                 <sourceDir>${project.basedir}/src/test/java</sourceDir>
               </sourceDirs>
             </configuration>
           </execution>
         </executions>
         <configuration>
-          <jvmTarget>11</jvmTarget>
+          <jvmTarget>
+            11</jvmTarget>
           <args>
             <arg>-Xallow-result-return-type</arg>
           </args>
@@ -449,7 +460,8 @@
           </execution>
         </executions>
         <configuration>
-          <source>11</source>
+          <source>
+            11</source>
           <target>11</target>
           <compilerArgs>
             <arg>-Xlint:all,-serial</arg>
@@ -462,7 +474,8 @@
         <version>2.22.2</version>
         <configuration>
           <systemPropertyVariables>
-            <java.util.logging.config.file>${project.basedir}/lib/logging.properties</java.util.logging.config.file>
+            <java.util.logging.config.file>
+              ${project.basedir}/lib/logging.properties</java.util.logging.config.file>
           </systemPropertyVariables>
         </configuration>
       </plugin>
@@ -471,7 +484,8 @@
         <artifactId>spotbugs-maven-plugin</artifactId>
         <version>4.7.0.0</version>
         <configuration>
-          <excludeFilterFile>${project.basedir}/spotbugs-exclude.xml</excludeFilterFile>
+          <excludeFilterFile>
+            ${project.basedir}/spotbugs-exclude.xml</excludeFilterFile>
           <includeTests>true</includeTests>
         </configuration>
         <dependencies>
@@ -488,10 +502,12 @@
         <version>${ktlint-maven-plugin.version}</version>
         <configuration>
           <sourceRoots>
-            <sourceRoot>${project.basedir}/src/main/kotlin</sourceRoot>
+            <sourceRoot>
+              ${project.basedir}/src/main/kotlin</sourceRoot>
           </sourceRoots>
           <testSourceRoots>
-            <testSourceRoot>${project.basedir}/src/test/kotlin</testSourceRoot>
+            <testSourceRoot>
+              ${project.basedir}/src/test/kotlin</testSourceRoot>
           </testSourceRoots>
         </configuration>
         <executions>
@@ -513,7 +529,8 @@
         <configuration>
           <archive>
             <manifest>
-              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+              <addDefaultImplementationEntries>
+                true</addDefaultImplementationEntries>
             </manifest>
           </archive>
         </configuration>
@@ -523,7 +540,8 @@
         <artifactId>maven-checkstyle-plugin</artifactId>
         <version>3.1.2</version>
         <configuration>
-          <configLocation>checkstyle.xml</configLocation>
+          <configLocation>
+            checkstyle.xml</configLocation>
         </configuration>
         <dependencies>
           <dependency>
