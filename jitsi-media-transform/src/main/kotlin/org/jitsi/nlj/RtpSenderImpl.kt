@@ -101,7 +101,7 @@ class RtpSenderImpl(
     // a generic handler here and then the bridge can put it into its PacketQueue and have
     // its handler (likely in another thread) grab the packet and send it out
     private var outgoingPacketHandler: PacketHandler? = null
-    private val useMuno = System.getenv("MUNO_ENABLE")?.toBoolean() ?: throw NullPointerException("MUNO_ENABLE env not set (set it to true or false)!")
+    private val useMuno = System.getenv("MUNO_ENABLE")?.toBoolean() ?: false
     override val bandwidthEstimator: BandwidthEstimator =
             if(useMuno) MunoEstimator(diagnosticContext, logger)
             else GoogleCcEstimator(diagnosticContext, logger)

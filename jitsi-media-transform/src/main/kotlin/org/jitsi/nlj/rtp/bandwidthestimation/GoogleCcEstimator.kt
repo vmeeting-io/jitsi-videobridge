@@ -37,11 +37,11 @@ open class GoogleCcEstimator(diagnosticContext: DiagnosticContext, parentLogger:
     var pktRecvCnt = 0
     var pktLossCnt = 0
 
-    var lastUpdateBwe = Instant.now()
+    var lastUpdateStats = Instant.now()
     val updateBwePeriodMs = 200
     var latestBwe = Bandwidth(2500000.0)
-    val munoCollectGccStats = System.getenv("MUNO_COLLECT_GCC_STATS")?.toBoolean() ?: throw NullPointerException("MUNO_COLLECT_GCC_STATS env not set (set it to true or false)!")
-    val munoStatsRestEp = System.getenv("MUNO_STATS_REST_EP") ?: throw NullPointerException("MUNO_STATS_REST_EP env not set!")
+    val munoCollectGccStats = System.getenv("MUNO_COLLECT_GCC_STATS")?.toBoolean() ?: false
+    val munoStatsRestEp = System.getenv("MUNO_STATS_REST_EP") ?: ""
 
     override val algorithmName = "Google CC"
 
@@ -108,21 +108,19 @@ open class GoogleCcEstimator(diagnosticContext: DiagnosticContext, parentLogger:
         pktLossCnt = 0
     }
     override fun doFeedbackComplete(now: Instant) {
-        if(Instant.now().toEpochMilli() - lastUpdateBwe.toEpochMilli() > updateBwePeriodMs) {
-            sendSideBandwidthEstimation.updateEstimate(now.toEpochMilli())
-            if(munoCollectGccStats) {
+        if(munoCollectGccStats) {
+            if(Instant.now().toEpochMilli() - lastUpdateStats.toEpochMilli() > updateBwePeriodMs) {
                 val epID = diagnosticContext["endpoint_id"]
                 // prevent divide by 0
                 val json = arrayOf(epID, Instant.now().toEpochMilli(), bitrateEstimatorAbsSendTime.incomingBitrate.getRateBps(), pktLossCnt/(pktLossCnt + pktRecvCnt + 0.001), sendSideBandwidthEstimation.rttMs, sqrt(bitrateEstimatorAbsSendTime.noiseVar))
                 post(url = munoStatsRestEp, json = json)
+                lastUpdateStats = Instant.now()
+                clear_stats()
             }
-
-            latestBwe = sendSideBandwidthEstimation.latestEstimate.bps
-            reportBandwidthEstimate(now, latestBwe)
-            lastUpdateBwe = Instant.now()
-
-            clear_stats()
         }
+        sendSideBandwidthEstimation.updateEstimate(now.toEpochMilli())
+        latestBwe = sendSideBandwidthEstimation.latestEstimate.bps
+        reportBandwidthEstimate(now, latestBwe)
     }
 
     override fun doRttUpdate(now: Instant, newRtt: Duration) {

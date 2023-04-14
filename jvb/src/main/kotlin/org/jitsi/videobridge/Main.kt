@@ -171,9 +171,12 @@ fun main(args: Array<String>) {
     }
 
     // init muno grpc
-    val munoGrpcEp = System.getenv("MUNO_GRPC_EP") ?: throw NullPointerException("MUNO_GRPC_EP env not set!")
-    val munoChannel = ManagedChannelBuilder.forTarget(munoGrpcEp).usePlaintext().build()
-    MunoClientService.init(munoChannel)
+    val useMuno = System.getenv("MUNO_ENABLE")?.toBoolean() ?: false
+    if (useMuno) {
+        val munoGrpcEp = System.getenv("MUNO_GRPC_EP") ?: throw NullPointerException("MUNO_GRPC_EP env not set!")
+        val munoChannel = ManagedChannelBuilder.forTarget(munoGrpcEp).usePlaintext().build()
+        MunoClientService.init(munoChannel)
+    }
 
     // Block here until the bridge shuts down
     shutdownService.waitForShutdown()

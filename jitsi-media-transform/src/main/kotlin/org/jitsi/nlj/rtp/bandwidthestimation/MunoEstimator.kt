@@ -26,6 +26,7 @@ import kotlin.math.sqrt
 
 class MunoEstimator(diagnosticContext: DiagnosticContext, parentLogger: Logger) :
     GoogleCcEstimator(diagnosticContext, parentLogger) {
+    var lastUpdateBwe = Instant.now()
     val useGrpc = System.getenv("MUNO_USE_GRPC")?.toBoolean() ?: throw NullPointerException("MUNO_USE_GRPC env not set (set it to true or false)!")
     val munoPredRestEp = System.getenv("MUNO_PRED_REST_EP") ?: throw NullPointerException("MUNO_PRED_REST_EP env not set!")
     val getBitrateStatsFunc = diagnosticContext["getBitrateStatsFunc"] as () -> Array<Long>
