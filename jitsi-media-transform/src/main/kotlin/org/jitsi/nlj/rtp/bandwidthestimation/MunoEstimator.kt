@@ -55,11 +55,17 @@ class MunoEstimator(diagnosticContext: DiagnosticContext, parentLogger: Logger) 
 
                 latestBwe = Bandwidth(rep.jsonObject["bwe"].toString().toDouble())
             } else {
-                latestBwe = Bandwidth(runBlocking {
-                    munoClientService.munoGetBwe(epID, gccBwe.toFloat(),
-                                                lossRate.toFloat(),
-                                                bitrateEstimatorAbsSendTime.delayGrad.toFloat())
-                }.toDouble())
+                try {
+                    latestBwe = Bandwidth(runBlocking {
+                        munoClientService.munoGetBwe(epID, gccBwe.toFloat(),
+                                lossRate.toFloat(),
+                                bitrateEstimatorAbsSendTime.delayGrad.toFloat())
+                    }.toDouble())
+                } catch (e: Exception) {
+                    // fallback to GCC if failed
+                    latestBwe = sendSideBandwidthEstimation.latestEstimate.bps
+                    logger.error("Failed to connect to Muno server!", e)
+                }
             }
             reportBandwidthEstimate(now, latestBwe)
             lastUpdateBwe = Instant.now()

@@ -60,7 +60,7 @@ open class GoogleCcEstimator(diagnosticContext: DiagnosticContext, parentLogger:
         sendSideBandwidthEstimation.setMinMaxBitrate(minBw.bps.toInt(), newValue.bps.toInt())
     }
 
-    private val logger = createChildLogger(parentLogger)
+    val logger = createChildLogger(parentLogger)
 
     /**
      * Implements the delay-based part of Google CC.
