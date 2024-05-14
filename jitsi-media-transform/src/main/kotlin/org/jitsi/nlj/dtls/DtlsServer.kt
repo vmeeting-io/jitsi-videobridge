@@ -21,10 +21,10 @@ import org.bouncycastle.tls.DTLSServerProtocol
 import org.bouncycastle.tls.DTLSTransport
 import org.bouncycastle.tls.DatagramTransport
 import org.jitsi.nlj.srtp.TlsRole
-import org.jitsi.utils.logging2.cerror
-import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.cdebug
+import org.jitsi.utils.logging2.cerror
+import org.jitsi.utils.logging2.createChildLogger
 
 class DtlsServer(
     private val datagramTransport: DatagramTransport,
@@ -45,7 +45,9 @@ class DtlsServer(
             return dtlsServerProtocol.accept(tlsServer, datagramTransport).also {
                 logger.cdebug { "DTLS handshake finished" }
                 handshakeCompleteHandler(
-                    tlsServer.chosenSrtpProtectionProfile, TlsRole.SERVER, tlsServer.srtpKeyingMaterial
+                    tlsServer.chosenSrtpProtectionProfile,
+                    TlsRole.SERVER,
+                    tlsServer.srtpKeyingMaterial
                 )
             }
         } catch (t: Throwable) {

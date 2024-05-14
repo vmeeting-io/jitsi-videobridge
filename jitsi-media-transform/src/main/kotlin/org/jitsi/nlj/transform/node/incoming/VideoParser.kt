@@ -19,51 +19,61 @@ import org.jitsi.nlj.Event
 import org.jitsi.nlj.MediaSourceDesc
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.SetMediaSourcesEvent
-import org.jitsi.nlj.copy
 import org.jitsi.nlj.format.Vp8PayloadType
-import org.jitsi.nlj.stats.NodeStatsBlock
-import org.jitsi.nlj.transform.node.TransformerNode
-import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
-import org.jitsi.rtp.extensions.bytearray.toHex
-import org.jitsi.utils.logging2.Logger
-import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.nlj.format.Vp9PayloadType
+import org.jitsi.nlj.rtp.RtpExtensionType
 import org.jitsi.nlj.rtp.codec.VideoCodecParser
+import org.jitsi.nlj.rtp.codec.av1.Av1DDParser
 import org.jitsi.nlj.rtp.codec.vp8.Vp8Packet
 import org.jitsi.nlj.rtp.codec.vp8.Vp8Parser
 import org.jitsi.nlj.rtp.codec.vp9.Vp9Packet
 import org.jitsi.nlj.rtp.codec.vp9.Vp9Parser
+import org.jitsi.nlj.stats.NodeStatsBlock
+import org.jitsi.nlj.transform.node.TransformerNode
+import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
+import org.jitsi.rtp.extensions.bytearray.toHex
 import org.jitsi.rtp.rtp.RtpPacket
+import org.jitsi.utils.OrderedJsonObject
+import org.jitsi.utils.logging.DiagnosticContext
+import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.cdebug
-import java.util.concurrent.atomic.AtomicInteger
+import org.jitsi.utils.logging2.createChildLogger
 
 /**
  * Parse video packets at a codec level
  */
 class VideoParser(
     private val streamInformationStore: ReadOnlyStreamInformationStore,
-    parentLogger: Logger
+    parentLogger: Logger,
+    private val diagnosticContext: DiagnosticContext
 ) : TransformerNode("Video parser") {
     private val logger = createChildLogger(parentLogger)
-    private val numPacketsDroppedUnknownPt = AtomicInteger()
-    private var numKeyframes: Int = 0
-    private var numLayeringChanges: Int = 0
+    private val stats = Stats()
 
     private var sources: Array<MediaSourceDesc> = arrayOf()
     private var signaledSources: Array<MediaSourceDesc> = sources
 
+    private var av1DDExtId: Int? = null
+
     private var videoCodecParser: VideoCodecParser? = null
+
+    init {
+        streamInformationStore.onRtpExtensionMapping(RtpExtensionType.AV1_DEPENDENCY_DESCRIPTOR) {
+            av1DDExtId = it
+        }
+    }
 
     override fun transform(packetInfo: PacketInfo): PacketInfo? {
         val packet = packetInfo.packetAs<RtpPacket>()
+        val av1DDExtId = this.av1DDExtId // So null checks work
         val payloadType = streamInformationStore.rtpPayloadTypes[packet.payloadType.toByte()] ?: run {
             logger.error("Unrecognized video payload type ${packet.payloadType}, cannot parse video information")
-            numPacketsDroppedUnknownPt.incrementAndGet()
+            stats.numPacketsDroppedUnknownPt++
             return null
         }
         val parsedPacket = try {
-            when (payloadType) {
-                is Vp8PayloadType -> {
+            when {
+                payloadType is Vp8PayloadType -> {
                     val vp8Packet = packetInfo.packet.toOtherType(::Vp8Packet)
                     packetInfo.packet = vp8Packet
                     packetInfo.resetPayloadVerification()
@@ -78,7 +88,7 @@ class VideoParser(
                     }
                     vp8Packet
                 }
-                is Vp9PayloadType -> {
+                payloadType is Vp9PayloadType -> {
                     val vp9Packet = packetInfo.packet.toOtherType(::Vp9Packet)
                     packetInfo.packet = vp9Packet
                     packetInfo.resetPayloadVerification()
@@ -92,6 +102,22 @@ class VideoParser(
                         videoCodecParser = Vp9Parser(sources, logger)
                     }
                     vp9Packet
+                }
+                av1DDExtId != null && packet.getHeaderExtension(av1DDExtId) != null -> {
+                    if (videoCodecParser !is Av1DDParser) {
+                        logger.cdebug {
+                            "Creating new Av1DDParser, current videoCodecParser is ${videoCodecParser?.javaClass}"
+                        }
+                        resetSources()
+                        packetInfo.layeringChanged = true
+                        videoCodecParser = Av1DDParser(sources, logger, diagnosticContext)
+                    }
+
+                    val av1DDPacket = (videoCodecParser as Av1DDParser).createFrom(packet, av1DDExtId)
+                    packetInfo.packet = av1DDPacket
+                    packetInfo.resetPayloadVerification()
+
+                    av1DDPacket
                 }
                 else -> {
                     if (videoCodecParser != null) {
@@ -122,11 +148,11 @@ class VideoParser(
         /* Alternately we could keep track of keyframes we've already seen, by timestamp, but that seems unnecessary. */
         if (parsedPacket.isKeyframe && parsedPacket.isStartOfFrame) {
             logger.cdebug { "Received a keyframe for ssrc ${packet.ssrc} ${packet.sequenceNumber}" }
-            numKeyframes++
+            stats.numKeyframes++
         }
         if (packetInfo.layeringChanged) {
             logger.cdebug { "Layering structure changed for ssrc ${packet.ssrc} ${packet.sequenceNumber}" }
-            numLayeringChanges++
+            stats.numLayeringChanges++
         }
 
         return packetInfo
@@ -136,7 +162,7 @@ class VideoParser(
         when (event) {
             is SetMediaSourcesEvent -> {
                 sources = event.mediaSourceDescs
-                signaledSources = sources.copy()
+                signaledSources = event.signaledMediaSourceDescs
                 videoCodecParser?.sources = sources
             }
         }
@@ -160,11 +186,33 @@ class VideoParser(
 
     override fun trace(f: () -> Unit) = f.invoke()
 
-    override fun getNodeStats(): NodeStatsBlock {
-        return super.getNodeStats().apply {
-            addNumber("num_packets_dropped_unknown_pt", numPacketsDroppedUnknownPt.get())
+    override fun getNodeStats(): NodeStatsBlock = super.getNodeStats().apply { stats.addToNodeStatsBlock(this) }
+
+    fun getStats() = stats.snapshot()
+
+    class Stats {
+        var numKeyframes = 0
+        var numLayeringChanges = 0
+        var numPacketsDroppedUnknownPt = 0
+
+        fun snapshot() = Snapshot(numKeyframes, numLayeringChanges, numPacketsDroppedUnknownPt)
+
+        fun addToNodeStatsBlock(nodeStatsBlock: NodeStatsBlock) = nodeStatsBlock.apply {
+            addNumber("num_packets_dropped_unknown_pt", numPacketsDroppedUnknownPt)
             addNumber("num_keyframes", numKeyframes)
             addNumber("num_layering_changes", numLayeringChanges)
+        }
+
+        data class Snapshot(
+            val numKeyframes: Int,
+            var numLayeringChanges: Int,
+            var numPacketsDroppedUnknownPt: Int
+        ) {
+            fun toJson() = OrderedJsonObject().apply {
+                put("num_packets_dropped_unknown_pt", numPacketsDroppedUnknownPt)
+                put("num_keyframes", numKeyframes)
+                put("num_layering_changes", numLayeringChanges)
+            }
         }
     }
 }

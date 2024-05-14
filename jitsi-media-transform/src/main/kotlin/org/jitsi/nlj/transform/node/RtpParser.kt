@@ -21,10 +21,10 @@ import org.jitsi.nlj.rtp.AudioRtpPacket
 import org.jitsi.nlj.rtp.RedAudioRtpPacket
 import org.jitsi.nlj.rtp.VideoRtpPacket
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
-import org.jitsi.utils.logging2.cdebug
 import org.jitsi.rtp.rtp.RtpHeader
 import org.jitsi.utils.MediaType
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
 import org.jitsi.utils.logging2.createChildLogger
 
 class RtpParser(
@@ -42,13 +42,17 @@ class RtpParser(
             return null
         }
 
-        packetInfo.packet = when (payloadType.mediaType) {
+        val rtpPacket = when (payloadType.mediaType) {
             MediaType.AUDIO -> when (payloadType.encoding) {
                 RED -> packet.toOtherType(::RedAudioRtpPacket)
                 else -> packet.toOtherType(::AudioRtpPacket)
             }
             MediaType.VIDEO -> packet.toOtherType(::VideoRtpPacket)
             else -> throw Exception("Unrecognized media type: '${payloadType.mediaType}'")
+        }
+        packetInfo.packet = rtpPacket
+        if (rtpPacket.extensionsProfileType == 0xC0DE || rtpPacket.extensionsProfileType == 0xC2DE) {
+            packetInfo.originalHadCryptex = true
         }
 
         packetInfo.resetPayloadVerification()

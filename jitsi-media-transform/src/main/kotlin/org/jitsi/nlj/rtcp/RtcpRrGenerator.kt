@@ -15,8 +15,6 @@
  */
 package org.jitsi.nlj.rtcp
 
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ScheduledExecutorService
 import org.jitsi.nlj.transform.node.incoming.IncomingSsrcStats
 import org.jitsi.nlj.transform.node.incoming.IncomingStatisticsTracker
 import org.jitsi.nlj.util.schedule
@@ -25,7 +23,14 @@ import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.rtp.rtcp.RtcpReportBlock
 import org.jitsi.rtp.rtcp.RtcpRrPacketBuilder
 import org.jitsi.rtp.rtcp.RtcpSrPacket
+import org.jitsi.utils.MediaType
 import org.jitsi.utils.ms
+import org.jitsi.utils.times
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ScheduledExecutorService
 
 /**
  * Information about a sender that is used in the generation of RTCP report blocks.  NOTE that this does NOT correspond
@@ -34,14 +39,16 @@ import org.jitsi.utils.ms
  */
 private data class SenderInfo(
     var lastSrCompactedTimestamp: Long = 0,
-    var lastSrReceivedTime: Long = 0,
-    var statsSnapshot: IncomingSsrcStats.Snapshot = IncomingSsrcStats.Snapshot()
+    var lastSrReceivedTime: Instant? = null,
+    // The media type doesn't affect RTCP RR/SR generation. Initialize with a dummy value.
+    var statsSnapshot: IncomingSsrcStats.Snapshot = IncomingSsrcStats.Snapshot(mediaType = MediaType.VIDEO)
 ) {
-    private fun hasReceivedSr(): Boolean = lastSrReceivedTime != 0L
+    private fun hasReceivedSr(): Boolean = lastSrReceivedTime != null
 
-    fun getDelaySinceLastSr(now: Long): Long {
+    fun getDelaySinceLastSr(now: Instant): Long {
         return if (hasReceivedSr()) {
-            ((now - lastSrReceivedTime) * 65.536).toLong()
+            // This value is in 1/65536 of a second, so multiplying by 65536 gives us the value
+            Duration.between(lastSrReceivedTime, now).times(65536).seconds
         } else {
             0
         }
@@ -59,6 +66,7 @@ class RtcpRrGenerator(
     private val backgroundExecutor: ScheduledExecutorService,
     private val rtcpSender: (RtcpPacket) -> Unit = {},
     private val incomingStatisticsTracker: IncomingStatisticsTracker,
+    private val clock: Clock = Clock.systemUTC(),
     private val additionalPacketSupplier: () -> List<RtcpPacket>
 ) : RtcpListener {
     var running: Boolean = true
@@ -69,7 +77,7 @@ class RtcpRrGenerator(
         doWork()
     }
 
-    override fun rtcpPacketReceived(packet: RtcpPacket, receivedTime: Long) {
+    override fun rtcpPacketReceived(packet: RtcpPacket, receivedTime: Instant?) {
         when (packet) {
             is RtcpSrPacket -> {
                 // Note the time we received an SR so that it can be used when creating RtcpReportBlocks
@@ -84,8 +92,8 @@ class RtcpRrGenerator(
 
     private fun doWork() {
         if (running) {
-            val streamStats = incomingStatisticsTracker.getSnapshot()
-            val now = System.currentTimeMillis()
+            val streamStats = incomingStatisticsTracker.getSnapshotOfActiveSsrcs()
+            val now = clock.instant()
             val reportBlocks = mutableListOf<RtcpReportBlock>()
             streamStats.ssrcStats.forEach { (ssrc, statsSnapshot) ->
                 val senderInfo = senderInfos.computeIfAbsent(ssrc) {
@@ -119,7 +127,9 @@ class RtcpRrGenerator(
             when (packets.size) {
                 0 -> {}
                 1 -> rtcpSender(packets.first())
-                else -> for (packet in CompoundRtcpPacket.createWithMtu(packets)) { rtcpSender(packet) }
+                else -> for (packet in CompoundRtcpPacket.createWithMtu(packets)) {
+                    rtcpSender(packet)
+                }
             }
             backgroundExecutor.schedule(this::doWork, reportingInterval)
         }

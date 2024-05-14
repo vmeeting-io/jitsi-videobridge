@@ -17,9 +17,9 @@
 package org.jitsi.nlj.util
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.comparables.shouldBeGreaterThan
+import io.kotest.matchers.shouldBe
 
 internal class Rfc3711IndexTrackerTest : ShouldSpec() {
     override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
@@ -40,7 +40,7 @@ internal class Rfc3711IndexTrackerTest : ShouldSpec() {
                 context("and then another which does roll over") {
                     val rollOverIndex = indexTracker.update(2)
                     should("return the proper index") {
-                        rollOverIndex shouldBe 1 /* roc */ * 0x1_0000 + 2L
+                        rollOverIndex shouldBe 1 * 0x1_0000 + 2L
                     }
                     context("and then a sequence number from the previous rollover") {
                         val prevRollOverIndex = indexTracker.update(65002)

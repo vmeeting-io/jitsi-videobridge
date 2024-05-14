@@ -20,23 +20,29 @@ import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.format.AudioRedPayloadType
-import org.jitsi.nlj.rtp.RedAudioRtpPacket
 import org.jitsi.nlj.rtp.AudioRtpPacket
+import org.jitsi.nlj.rtp.RedAudioRtpPacket
 import org.jitsi.nlj.rtp.RtpExtensionType
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.util.BufferPool
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
 import org.jitsi.nlj.util.RtpPacketCache
+import org.jitsi.rtp.extensions.toHex
+import org.jitsi.rtp.rtp.RedundancyBlockHeader
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi.rtp.rtp.header_extensions.AudioLevelHeaderExtension
 import org.jitsi.rtp.util.RtpUtils.Companion.applySequenceNumberDelta
+import org.jitsi.rtp.util.RtpUtils.Companion.getTimestampDiffAsInt
+import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.createChildLogger
 
 class AudioRedHandler(
-    streamInformationStore: ReadOnlyStreamInformationStore
+    streamInformationStore: ReadOnlyStreamInformationStore,
+    parentLogger: Logger
 ) : MultipleOutputTransformerNode("RedHandler") {
 
+    private val logger = createChildLogger(parentLogger)
     private val stats = Stats()
-    val config = Config()
 
     var audioLevelExtId: Int? = null
     var redPayloadType: Int? = null
@@ -52,7 +58,6 @@ class AudioRedHandler(
         }
     }
 
-    @ExperimentalStdlibApi
     override fun transform(packetInfo: PacketInfo): List<PacketInfo> {
         val audioPacket = packetInfo.packet as? AudioRtpPacket ?: return listOf(packetInfo)
 
@@ -79,6 +84,7 @@ class AudioRedHandler(
         addNumber("audio_packets_forwarded", stats.audioPacketsForwarded)
         addNumber("lost_packets_recovered", stats.lostPacketsRecovered)
         addNumber("redundancy_packets_added", stats.redundancyPacketsAdded)
+        addNumber("invalid_red_packets_dropped", stats.invalidRedPacketsDropped)
     }
 
     override fun stop() = super.stop().also {
@@ -123,20 +129,32 @@ class AudioRedHandler(
 
             when (config.distance) {
                 RedDistance.ONE -> {
-                    getPacketToProtect(applySequenceNumberDelta(seq, -1), config.vadOnly)?.also { secondary ->
+                    getPacketToProtect(
+                        applySequenceNumberDelta(seq, -1),
+                        audioRtpPacket.timestamp,
+                        config.vadOnly
+                    )?.also { secondary ->
                         redundancy.add(secondary)
                         stats.redundancyPacketAdded()
                     }
                 }
                 RedDistance.TWO -> {
-                    getPacketToProtect(applySequenceNumberDelta(seq, -1), false)?.also { secondary ->
+                    getPacketToProtect(
+                        applySequenceNumberDelta(seq, -1),
+                        audioRtpPacket.timestamp,
+                        false
+                    )?.also { secondary ->
                         // With distance 2 we only add the tertiary packet when there is a secondary available
                         // (regardless of secondary's VAD). This guarantees that the sequence numbers of the
                         // redundancy packets always directly proceed the primary packet, i.e. that we don't encode
                         // a packet with primary seq=N and a single redundancy with seq=N-2. This is be important
                         // when the receiver of the RED stream is another jitsi-videobridge instance (via Octo),
                         // which makes that assumption about the stream it receives.
-                        val tertiary = getPacketToProtect(applySequenceNumberDelta(seq, -2), config.vadOnly)
+                        val tertiary = getPacketToProtect(
+                            applySequenceNumberDelta(seq, -2),
+                            audioRtpPacket.timestamp,
+                            config.vadOnly
+                        )
                         if (tertiary != null) {
                             redundancy.add(tertiary)
                             stats.redundancyPacketAdded()
@@ -162,14 +180,20 @@ class AudioRedHandler(
             return packetInfo
         }
 
-        private fun getPacketToProtect(seq: Int, vadOnly: Boolean): RtpPacket? {
+        private fun getPacketToProtect(seq: Int, primaryTimestamp: Long, vadOnly: Boolean): RtpPacket? {
             // All of the transform pipeline runs in a single thread, and we only use the packet momentarily to make a
-            // copy into a new RED packet, so its safe to just peek() at it.
+            // copy into a new RED packet, so it's safe to just peek() at it.
             sentAudioCache.peek(seq)?.item?.let {
                 // In vad-only mode, we only add redundancy for packets that have an audio level extension with the VAD
                 // bit set.
                 if (!vadOnly || it.hasVad()) {
-                    return it
+                    // Don't attempt to encode packets with timestamp diff that's too large to encode (happens with
+                    // 400ms opus frames e.g. when DTX is used)
+                    if (getTimestampDiffAsInt(primaryTimestamp, it.timestamp) <=
+                        RedundancyBlockHeader.MAX_TIMESTAMP_OFFSET
+                    ) {
+                        return it
+                    }
                 }
             }
             return null
@@ -186,7 +210,6 @@ class AudioRedHandler(
          * RED format, it is either forwarded as it is or it is "stripped" to its primary encoding, with redundancy
          * blocks being read if there are non-received packets.
          */
-        @ExperimentalStdlibApi
         fun transformRed(packetInfo: PacketInfo): List<PacketInfo> {
             // Whether we need to strip the RED encapsulation
             val strip = when (redPayloadType) {
@@ -198,43 +221,58 @@ class AudioRedHandler(
                 }
             }
 
-            return if (strip) buildList {
-                val redPacket = packetInfo.packetAs<RedAudioRtpPacket>()
+            return if (strip) {
+                buildList {
+                    val redPacket = packetInfo.packetAs<RedAudioRtpPacket>()
 
-                val seq = redPacket.sequenceNumber
-                val prev = applySequenceNumberDelta(seq, -1)
-                val prev2 = applySequenceNumberDelta(seq, -2)
-                val prevMissing = !sentAudioCache.contains(prev)
-                val prev2Missing = !sentAudioCache.contains(prev2)
+                    val seq = redPacket.sequenceNumber
+                    val prev = applySequenceNumberDelta(seq, -1)
+                    val prev2 = applySequenceNumberDelta(seq, -2)
+                    val prevMissing = !sentAudioCache.contains(prev)
+                    val prev2Missing = !sentAudioCache.contains(prev2)
 
-                if (prevMissing || prev2Missing) {
-                    redPacket.removeRedAndGetRedundancyPackets().forEach {
-                        if ((it.sequenceNumber == prev && prevMissing) ||
-                            (it.sequenceNumber == prev2 && prev2Missing)
-                        ) {
-                            add(PacketInfo(it))
-                            stats.lostPacketRecovered()
+                    try {
+                        if (prevMissing || prev2Missing) {
+                            redPacket.removeRedAndGetRedundancyPackets().forEach {
+                                if ((it.sequenceNumber == prev && prevMissing) ||
+                                    (it.sequenceNumber == prev2 && prev2Missing)
+                                ) {
+                                    add(PacketInfo(it))
+                                    stats.lostPacketRecovered()
+                                }
+                                sentAudioCache.insert(it)
+                            }
+                        } else {
+                            redPacket.removeRed()
                         }
-                        sentAudioCache.insert(it)
+                    } catch (e: IllegalArgumentException) {
+                        logger.warn(
+                            "Dropping invalid RED packet from ep=${packetInfo.endpointId} (${e.message}): " +
+                                "$redPacket. Contents (50B): ${redPacket.toHex(50)}"
+                        )
+                        stats.invalidRedPacketDropped()
+                        return@buildList
                     }
-                } else {
-                    redPacket.removeRed()
-                }
 
-                stats.redPacketDecapsulated()
-                packetInfo.packet = redPacket.toOtherType(::AudioRtpPacket)
+                    stats.redPacketDecapsulated()
+                    packetInfo.packet = redPacket.toOtherType(::AudioRtpPacket)
 
-                // It's possible we already forwarded the primary packet if we recovered it from a previously received
-                // packet.
-                if (!sentAudioCache.contains(seq)) {
-                    sentAudioCache.insert(packetInfo.packetAs())
-                    add(packetInfo)
+                    // It's possible we already forwarded the primary packet if we recovered it from a previously received
+                    // packet.
+                    if (!sentAudioCache.contains(seq)) {
+                        sentAudioCache.insert(packetInfo.packetAs())
+                        add(packetInfo)
+                    }
                 }
             } else {
                 stats.redPacketForwarded()
                 listOf(packetInfo)
             }
         }
+    }
+
+    companion object {
+        val config = Config()
     }
 }
 
@@ -243,10 +281,12 @@ enum class RedPolicy {
      * No change.
      */
     NOOP,
+
     /**
      * Always strip.
      */
     STRIP,
+
     /**
      * Add RED for all endpoints.
      */
@@ -266,6 +306,7 @@ enum class RedDistance {
 data class Stats(
     var redPacketsDecapsulated: Int = 0,
     var redPacketsForwarded: Int = 0,
+    var invalidRedPacketsDropped: Int = 0,
     var audioPacketsEncapsulated: Int = 0,
     var audioPacketsForwarded: Int = 0,
     var lostPacketsRecovered: Int = 0,
@@ -273,6 +314,7 @@ data class Stats(
 ) {
     fun redPacketDecapsulated() = redPacketsDecapsulated++
     fun redPacketForwarded() = redPacketsForwarded++
+    fun invalidRedPacketDropped() = invalidRedPacketsDropped++
     fun audioPacketEncapsulated() = audioPacketsEncapsulated++
     fun audioPacketForwarded() = audioPacketsForwarded++
     fun lostPacketRecovered() = lostPacketsRecovered++

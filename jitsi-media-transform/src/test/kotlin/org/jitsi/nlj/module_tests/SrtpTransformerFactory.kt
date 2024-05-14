@@ -28,6 +28,8 @@ class SrtpTransformerFactory {
                 srtpData.srtpProfileInformation,
                 srtpData.keyingMaterial,
                 srtpData.tlsRole,
+                // TODO: add tests for the cryptex=true case
+                cryptex = false,
                 StdoutLogger()
             )
         }

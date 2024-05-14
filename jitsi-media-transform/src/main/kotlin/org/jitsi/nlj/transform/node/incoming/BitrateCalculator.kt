@@ -19,19 +19,19 @@ package org.jitsi.nlj.transform.node.incoming
 import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
 import org.jitsi.nlj.Event
+import org.jitsi.nlj.MediaSourceDesc
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.SetMediaSourcesEvent
+import org.jitsi.nlj.findRtpLayerDescs
 import org.jitsi.nlj.rtp.VideoRtpPacket
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.ObserverNode
 import org.jitsi.nlj.util.Bandwidth
-import org.jitsi.utils.logging2.cdebug
-import org.jitsi.utils.logging2.Logger
-import org.jitsi.utils.logging2.createChildLogger
-import org.jitsi.nlj.MediaSourceDesc
-import org.jitsi.nlj.findRtpLayerDesc
 import org.jitsi.nlj.util.BitrateTracker
 import org.jitsi.nlj.util.bytes
+import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
+import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.utils.secs
 import org.jitsi.utils.stats.RateTracker
 import java.time.Clock
@@ -55,8 +55,8 @@ class VideoBitrateCalculator(
         super.observe(packetInfo)
 
         val videoRtpPacket: VideoRtpPacket = packetInfo.packet as VideoRtpPacket
-        mediaSourceDescs.findRtpLayerDesc(videoRtpPacket)?.let {
-            val now = System.currentTimeMillis()
+        val now = clock.millis()
+        mediaSourceDescs.findRtpLayerDescs(videoRtpPacket).forEach {
             if (it.updateBitrate(videoRtpPacket.length.bytes, now)) {
                 /* When a layer is started when it was previously inactive,
                  * we want to recalculate bandwidth allocation.
@@ -84,7 +84,7 @@ open class BitrateCalculator(
      * At what threshold the stream is considered active.
      */
     private val activePacketRateThreshold: Int = 5,
-    private val clock: Clock = Clock.systemUTC()
+    protected val clock: Clock = Clock.systemUTC()
 ) : ObserverNode(name) {
     private val bitrateTracker = createBitrateTracker()
     private val packetRateTracker = createRateTracker()
@@ -102,10 +102,12 @@ open class BitrateCalculator(
             // In the grace period any received data counts, and we check the bitrate because we can only access the
             // packet rate rounded to an Int.
             bitrate.bps > 0
-        } else packetRatePps >= activePacketRateThreshold
+        } else {
+            packetRatePps >= activePacketRateThreshold
+        }
 
     override fun observe(packetInfo: PacketInfo) {
-        val now = System.currentTimeMillis()
+        val now = clock.millis()
         bitrateTracker.update(packetInfo.packet.length.bytes, now)
         packetRateTracker.update(1, now)
     }

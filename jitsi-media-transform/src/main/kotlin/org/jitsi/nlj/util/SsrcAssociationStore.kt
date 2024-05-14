@@ -16,10 +16,10 @@
 
 package org.jitsi.nlj.util
 
-import java.util.concurrent.CopyOnWriteArrayList
 import org.jitsi.nlj.rtp.SsrcAssociationType
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.NodeStatsProducer
+import java.util.concurrent.CopyOnWriteArrayList
 
 typealias SsrcAssociationHandler = (SsrcAssociation) -> Unit
 
@@ -27,6 +27,7 @@ class SsrcAssociationStore(
     private val name: String = "SSRC Associations"
 ) : NodeStatsProducer {
     private val ssrcAssociations: MutableList<SsrcAssociation> = CopyOnWriteArrayList()
+
     /**
      * The SSRC associations indexed by the primary SSRC.  Since an SSRC may have
      * multiple secondary SSRC mappings, the primary SSRC maps to a list of its
@@ -58,8 +59,7 @@ class SsrcAssociationStore(
         ssrcAssociationsBySecondarySsrc = ssrcAssociations.associateBy(SsrcAssociation::secondarySsrc)
     }
 
-    fun getPrimarySsrc(secondarySsrc: Long): Long? =
-        ssrcAssociationsBySecondarySsrc[secondarySsrc]?.primarySsrc
+    fun getPrimarySsrc(secondarySsrc: Long): Long? = ssrcAssociationsBySecondarySsrc[secondarySsrc]?.primarySsrc
 
     fun getSecondarySsrc(primarySsrc: Long, associationType: SsrcAssociationType): Long? =
         ssrcAssociationsByPrimarySsrc[primarySsrc]?.find { it.type == associationType }?.secondarySsrc

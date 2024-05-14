@@ -15,18 +15,18 @@
  */
 package org.jitsi.nlj.transform.node.incoming
 
-import java.util.concurrent.ConcurrentHashMap
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.format.RtxPayloadType
 import org.jitsi.nlj.rtp.RtxPacket
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.TransformerNode
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
-import org.jitsi.utils.logging2.cdebug
 import org.jitsi.rtp.extensions.unsigned.toPositiveInt
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
 import org.jitsi.utils.logging2.createChildLogger
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Handle incoming RTX packets to strip the RTX information and make them
@@ -40,6 +40,7 @@ class RtxHandler(
     private val logger = createChildLogger(parentLogger)
     private var numPaddingPacketsReceived = 0
     private var numRtxPacketsReceived = 0
+
     /**
      * Maps the Integer payload type of RTX to the [RtxPayloadType] instance.  We do this
      * so we can look up the associated (original) payload type from the [RtxPayloadType]
@@ -62,6 +63,14 @@ class RtxHandler(
         val rtpPacket = packetInfo.packetAs<RtpPacket>()
         val rtxPayloadType = rtxPtToRtxPayloadType[rtpPacket.payloadType.toPositiveInt()] ?: return packetInfo
         val originalSsrc = streamInformationStore.getLocalPrimarySsrc(rtpPacket.ssrc) ?: return packetInfo
+        if (packetInfo.shouldDiscard) {
+            /* Don't try to interpret an rtx [shouldDiscard] packet - SrtpTransformer may have skipped decrypting
+             * it, which means its originalSeqNum is gibberish.
+             * This doesn't need to wait until [DiscardableDiscarder], because we don't care about continuity of
+             * RTX sequence numbers.
+             */
+            return null
+        }
         // We do this check only after verifying we determine it's an RTX packet by finding
         // the associated payload type and SSRC above
         if (rtpPacket.payloadLength - rtpPacket.paddingSize < 2) {

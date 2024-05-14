@@ -21,6 +21,7 @@ import org.jitsi.nlj.resources.logging.StdoutLogger
 import org.jitsi.nlj.util.safeShutdown
 import org.jitsi.test_utils.Pcaps
 import org.jitsi.utils.secs
+import java.time.Clock
 import java.util.concurrent.Executors
 import java.util.logging.Level
 import kotlin.system.measureTimeMillis
@@ -47,8 +48,12 @@ fun main() {
     val receivers = mutableListOf<RtpReceiver>()
     repeat(numReceivers) {
         val receiver = ReceiverFactory.createReceiver(
-            executor, backgroundExecutor, pcap.srtpData,
-            pcap.payloadTypes, pcap.headerExtensions, pcap.ssrcAssociations,
+            executor,
+            backgroundExecutor,
+            pcap.srtpData,
+            pcap.payloadTypes,
+            pcap.headerExtensions,
+            pcap.ssrcAssociations,
             logger = StdoutLogger("receiver", Level.ALL)
         )
         receivers.add(receiver)
@@ -56,7 +61,7 @@ fun main() {
 
     producer.subscribe { pkt ->
         val packetInfo = PacketInfo(pkt)
-        packetInfo.receivedTime = System.currentTimeMillis()
+        packetInfo.receivedTime = Clock.systemUTC().instant()
         receivers.forEach { it.enqueuePacket(packetInfo.clone()) }
     }
 

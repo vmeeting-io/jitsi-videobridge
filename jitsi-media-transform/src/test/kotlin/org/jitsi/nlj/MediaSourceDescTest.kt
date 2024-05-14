@@ -16,8 +16,11 @@
 
 package org.jitsi.nlj
 
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
+import io.kotest.matchers.should
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.beInstanceOf
+import org.jitsi.nlj.rtp.codec.vpx.VpxRtpLayerDesc
 import org.jitsi.nlj.util.Bandwidth
 import org.jitsi.nlj.util.BitrateTracker
 import org.jitsi.nlj.util.bps
@@ -28,12 +31,17 @@ class MediaSourceDescTest : ShouldSpec() {
         val ssrcs = arrayOf(0xdeadbeefL, 0xcafebabeL, 0x01234567L)
         val source = createSource(
             ssrcs,
-            1, 3, "Fake owner", "Fake name"
+            1,
+            3,
+            "Fake owner",
+            "Fake name",
+            VideoType.DESKTOP
         )
 
         context("Source properties should be correct") {
             source.owner shouldBe "Fake owner"
             source.sourceName shouldBe "Fake name"
+            source.videoType shouldBe VideoType.DESKTOP
             source.rtpEncodings.size shouldBe 3
 
             source.rtpLayers.size shouldBe 9
@@ -51,6 +59,9 @@ class MediaSourceDescTest : ShouldSpec() {
                 e.layers.size shouldBe 3
                 for (j in e.layers.indices) {
                     val l = e.layers[j]
+                    l should beInstanceOf<VpxRtpLayerDesc>()
+                    l as VpxRtpLayerDesc
+
                     l.eid shouldBe i
                     l.tid shouldBe j
                     l.sid shouldBe -1
@@ -108,8 +119,7 @@ class MediaSourceDescTest : ShouldSpec() {
  * @return the subjective quality index of the flow specified in the
  * arguments.
  */
-private fun idx(spatialIdx: Int, temporalIdx: Int, temporalLen: Int) =
-    spatialIdx * temporalLen + temporalIdx
+private fun idx(spatialIdx: Int, temporalIdx: Int, temporalLen: Int) = spatialIdx * temporalLen + temporalIdx
 
 /*
  * Creates layers for an encoding.
@@ -119,30 +129,26 @@ private fun idx(spatialIdx: Int, temporalIdx: Int, temporalLen: Int) =
  * @param height the maximum height of the top spatial layer
  * @return an array that holds the layer descriptions.
  */
-private fun createRTPLayerDescs(
-    spatialLen: Int,
-    temporalLen: Int,
-    encodingIdx: Int,
-    height: Int
-): Array<RtpLayerDesc> {
-    val rtpLayers = arrayOfNulls<RtpLayerDesc>(spatialLen * temporalLen)
+private fun createRTPLayerDescs(spatialLen: Int, temporalLen: Int, encodingIdx: Int, height: Int): Array<RtpLayerDesc> {
+    val rtpLayers = arrayOfNulls<VpxRtpLayerDesc>(spatialLen * temporalLen)
     for (spatialIdx in 0 until spatialLen) {
         var frameRate = 30.toDouble() / (1 shl temporalLen - 1)
         for (temporalIdx in 0 until temporalLen) {
             val idx: Int = idx(spatialIdx, temporalIdx, temporalLen)
-            var dependencies: Array<RtpLayerDesc>
-            dependencies = if (spatialIdx > 0 && temporalIdx > 0) {
+            val dependencies: Array<VpxRtpLayerDesc> = if (spatialIdx > 0 && temporalIdx > 0) {
                 // this layer depends on spatialIdx-1 and temporalIdx-1.
                 arrayOf(
                     rtpLayers[
                         idx(
-                            spatialIdx, temporalIdx - 1,
+                            spatialIdx,
+                            temporalIdx - 1,
                             temporalLen
                         )
                     ]!!,
                     rtpLayers[
                         idx(
-                            spatialIdx - 1, temporalIdx,
+                            spatialIdx - 1,
+                            temporalIdx,
                             temporalLen
                         )
                     ]!!
@@ -152,7 +158,8 @@ private fun createRTPLayerDescs(
                 arrayOf(
                     rtpLayers[
                         idx(
-                            spatialIdx - 1, temporalIdx,
+                            spatialIdx - 1,
+                            temporalIdx,
                             temporalLen
                         )
                     ]!!
@@ -162,7 +169,8 @@ private fun createRTPLayerDescs(
                 arrayOf(
                     rtpLayers[
                         idx(
-                            spatialIdx, temporalIdx - 1,
+                            spatialIdx,
+                            temporalIdx - 1,
                             temporalLen
                         )
                     ]!!
@@ -173,9 +181,13 @@ private fun createRTPLayerDescs(
             }
             val temporalId = if (temporalLen > 1) temporalIdx else -1
             val spatialId = if (spatialLen > 1) spatialIdx else -1
-            rtpLayers[idx] = RtpLayerDesc(
+            rtpLayers[idx] = VpxRtpLayerDesc(
                 encodingIdx,
-                temporalId, spatialId, height, frameRate, dependencies
+                temporalId,
+                spatialId,
+                height,
+                frameRate,
+                dependencies
             )
             frameRate *= 2.0
         }
@@ -202,8 +214,10 @@ private fun createRtpEncodingDesc(
     height: Int
 ): RtpEncodingDesc {
     val layers: Array<RtpLayerDesc> = createRTPLayerDescs(
-        spatialLen, temporalLen,
-        encodingIdx, height
+        spatialLen,
+        temporalLen,
+        encodingIdx,
+        height
     )
     val enc = RtpEncodingDesc(primarySsrc, layers)
     return enc
@@ -214,22 +228,25 @@ private fun createSource(
     numSpatialLayersPerStream: Int,
     numTemporalLayersPerStream: Int,
     owner: String,
-    name: String?
+    name: String,
+    videoType: VideoType,
 ): MediaSourceDesc {
-    var height = 720
+    var height = 180
 
-    val encodings = Array(primarySsrcs.size) {
-        encodingIdx ->
-        val primarySsrc: Long = primarySsrcs.get(encodingIdx)
+    val encodings = Array(primarySsrcs.size) { encodingIdx ->
+        val primarySsrc: Long = primarySsrcs[encodingIdx]
         val ret = createRtpEncodingDesc(
             primarySsrc,
-            numSpatialLayersPerStream, numTemporalLayersPerStream, encodingIdx, height
+            numSpatialLayersPerStream,
+            numTemporalLayersPerStream,
+            encodingIdx,
+            height
         )
         height *= 2
         ret
     }
 
-    return MediaSourceDesc(encodings, owner, name)
+    return MediaSourceDesc(encodings, owner, name, videoType)
 }
 
 /** A fake rate statistics object, for testing */

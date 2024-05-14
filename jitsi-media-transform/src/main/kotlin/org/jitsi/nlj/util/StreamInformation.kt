@@ -16,9 +16,6 @@
 
 package org.jitsi.nlj.util
 
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.Collections
 import org.jitsi.nlj.format.PayloadType
 import org.jitsi.nlj.format.supportsPli
 import org.jitsi.nlj.format.supportsRemb
@@ -29,6 +26,9 @@ import org.jitsi.nlj.rtp.SsrcAssociationType
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.NodeStatsProducer
 import org.jitsi.utils.MediaType
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * A handler installed on a specific [RtpExtensionType] to be notified
@@ -38,6 +38,8 @@ import org.jitsi.utils.MediaType
 typealias RtpExtensionHandler = (Int?) -> Unit
 
 typealias RtpPayloadTypesChangedHandler = (Map<Byte, PayloadType>) -> Unit
+
+typealias ExtmapAllowMixedChangedHandler = (Boolean) -> Unit
 
 /**
  * Makes information about stream metadata (RTP extensions, payload types,
@@ -50,6 +52,9 @@ interface ReadOnlyStreamInformationStore : NodeStatsProducer {
 
     val rtpPayloadTypes: Map<Byte, PayloadType>
     fun onRtpPayloadTypesChanged(handler: RtpPayloadTypesChangedHandler)
+
+    val extmapAllowMixed: Boolean
+    fun onExtmapAllowMixedChanged(handler: ExtmapAllowMixedChangedHandler)
 
     fun getLocalPrimarySsrc(secondarySsrc: Long): Long?
     fun getRemoteSecondarySsrc(primarySsrc: Long, associationType: SsrcAssociationType): Long?
@@ -82,6 +87,8 @@ interface StreamInformationStore : ReadOnlyStreamInformationStore {
     fun addRtpPayloadType(payloadType: PayloadType)
     fun clearRtpPayloadTypes()
 
+    fun setExtmapAllowMixed(extmapAllowMixed: Boolean)
+
     fun addSsrcAssociation(ssrcAssociation: SsrcAssociation)
 
     fun addReceiveSsrc(ssrc: Long, mediaType: MediaType)
@@ -95,6 +102,8 @@ class StreamInformationStoreImpl : StreamInformationStore {
     private val _rtpExtensions: MutableList<RtpExtension> = CopyOnWriteArrayList()
     override val rtpExtensions: List<RtpExtension>
         get() = _rtpExtensions
+    private val extmapAllowMixedHandlers =
+        mutableListOf<ExtmapAllowMixedChangedHandler>()
 
     private val payloadTypesLock = Any()
     private val payloadTypeHandlers = mutableListOf<RtpPayloadTypesChangedHandler>()
@@ -146,6 +155,26 @@ class StreamInformationStoreImpl : StreamInformationStore {
         }
     }
 
+    override var extmapAllowMixed: Boolean = false
+        private set
+
+    override fun setExtmapAllowMixed(allow: Boolean) {
+        synchronized(extensionsLock) {
+            val changed = (extmapAllowMixed != allow)
+            extmapAllowMixed = allow
+            if (changed) {
+                extmapAllowMixedHandlers.forEach { it(allow) }
+            }
+        }
+    }
+
+    override fun onExtmapAllowMixedChanged(handler: ExtmapAllowMixedChangedHandler) {
+        synchronized(extensionsLock) {
+            extmapAllowMixedHandlers.add(handler)
+            handler(extmapAllowMixed)
+        }
+    }
+
     override fun addRtpPayloadType(payloadType: PayloadType) {
         synchronized(payloadTypesLock) {
             _rtpPayloadTypes[payloadType.pt] = payloadType
@@ -176,8 +205,7 @@ class StreamInformationStoreImpl : StreamInformationStore {
     // NOTE(brian): Currently, we only have a use case to do a mapping of
     // secondary -> primary for local SSRCs and primary -> secondary for
     // remote SSRCs
-    override fun getLocalPrimarySsrc(secondarySsrc: Long): Long? =
-        localSsrcAssociations.getPrimarySsrc(secondarySsrc)
+    override fun getLocalPrimarySsrc(secondarySsrc: Long): Long? = localSsrcAssociations.getPrimarySsrc(secondarySsrc)
 
     override fun getRemoteSecondarySsrc(primarySsrc: Long, associationType: SsrcAssociationType): Long? =
         remoteSsrcAssociations.getSecondarySsrc(primarySsrc, associationType)
@@ -189,11 +217,9 @@ class StreamInformationStoreImpl : StreamInformationStore {
         }
     }
 
-    override fun addReceiveSsrc(ssrc: Long, mediaType: MediaType) =
-        receiveSsrcStore.addReceiveSsrc(ssrc, mediaType)
+    override fun addReceiveSsrc(ssrc: Long, mediaType: MediaType) = receiveSsrcStore.addReceiveSsrc(ssrc, mediaType)
 
-    override fun removeReceiveSsrc(ssrc: Long) =
-        receiveSsrcStore.removeReceiveSsrc(ssrc)
+    override fun removeReceiveSsrc(ssrc: Long) = receiveSsrcStore.removeReceiveSsrc(ssrc)
 
     override fun getNodeStats(): NodeStatsBlock = NodeStatsBlock("Stream Information Store").apply {
         addBlock(

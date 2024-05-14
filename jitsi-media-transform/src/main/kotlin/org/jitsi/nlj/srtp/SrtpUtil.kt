@@ -23,7 +23,7 @@ import org.jitsi.utils.logging2.Logger
 
 enum class TlsRole {
     CLIENT,
-    SERVER;
+    SERVER
 }
 
 class SrtpUtil {
@@ -34,12 +34,24 @@ class SrtpUtil {
 
         fun getSrtpProtectionProfileFromName(profileName: String): Int {
             return when (profileName) {
-                "SRTP_AES128_CM_HMAC_SHA1_80" -> { SRTPProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80 }
-                "SRTP_AES128_CM_HMAC_SHA1_32" -> { SRTPProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_32 }
-                "SRTP_NULL_HMAC_SHA1_32" -> { SRTPProtectionProfile.SRTP_NULL_HMAC_SHA1_32 }
-                "SRTP_NULL_HMAC_SHA1_80" -> { SRTPProtectionProfile.SRTP_NULL_HMAC_SHA1_80 }
-                "SRTP_AEAD_AES_128_GCM" -> { SRTPProtectionProfile.SRTP_AEAD_AES_128_GCM }
-                "SRTP_AEAD_AES_256_GCM" -> { SRTPProtectionProfile.SRTP_AEAD_AES_256_GCM }
+                "SRTP_AES128_CM_HMAC_SHA1_80" -> {
+                    SRTPProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_80
+                }
+                "SRTP_AES128_CM_HMAC_SHA1_32" -> {
+                    SRTPProtectionProfile.SRTP_AES128_CM_HMAC_SHA1_32
+                }
+                "SRTP_NULL_HMAC_SHA1_32" -> {
+                    SRTPProtectionProfile.SRTP_NULL_HMAC_SHA1_32
+                }
+                "SRTP_NULL_HMAC_SHA1_80" -> {
+                    SRTPProtectionProfile.SRTP_NULL_HMAC_SHA1_80
+                }
+                "SRTP_AEAD_AES_128_GCM" -> {
+                    SRTPProtectionProfile.SRTP_AEAD_AES_128_GCM
+                }
+                "SRTP_AEAD_AES_256_GCM" -> {
+                    SRTPProtectionProfile.SRTP_AEAD_AES_256_GCM
+                }
                 else -> throw IllegalArgumentException("Unsupported SRTP protection profile: $profileName")
             }
         }
@@ -120,6 +132,7 @@ class SrtpUtil {
             srtpProfileInformation: SrtpProfileInformation,
             keyingMaterial: ByteArray,
             tlsRole: TlsRole,
+            cryptex: Boolean,
             parentLogger: Logger
         ): SrtpTransformers {
             val clientWriteSrtpMasterKey = ByteArray(srtpProfileInformation.cipherKeyLength)
@@ -138,8 +151,10 @@ class SrtpUtil {
                 val keyingMaterialValue = keyingMaterialValues[i]
 
                 System.arraycopy(
-                    keyingMaterial, keyingMaterialOffset,
-                    keyingMaterialValue, 0,
+                    keyingMaterial,
+                    keyingMaterialOffset,
+                    keyingMaterialValue,
+                    0,
                     keyingMaterialValue.size
                 )
                 keyingMaterialOffset += keyingMaterialValue.size
@@ -166,6 +181,8 @@ class SrtpUtil {
                send-side SRTP replay protection. */
             /* TODO: disable this only in cases where we actually need to use retransmitPlain? */
             srtpPolicy.isSendReplayEnabled = false
+
+            srtpPolicy.isCryptexEnabled = cryptex
 
             val clientSrtpContextFactory = SrtpContextFactory(
                 tlsRole == TlsRole.CLIENT,

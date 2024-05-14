@@ -17,19 +17,19 @@
 package org.jitsi.nlj.stats
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.doubles.plusOrMinus
+import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
-import java.time.Duration
 import org.jitsi.nlj.resources.logging.StdoutLogger
-import org.jitsi.test.time.FakeClock
 import org.jitsi.nlj.test_utils.timeline
 import org.jitsi.rtp.rtcp.RtcpReportBlock
 import org.jitsi.rtp.rtcp.RtcpRrPacket
 import org.jitsi.rtp.rtcp.RtcpSrPacket
 import org.jitsi.utils.ms
+import org.jitsi.utils.time.FakeClock
+import java.time.Duration
 
 class EndpointConnectionStatsTest : ShouldSpec() {
     override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
@@ -58,7 +58,7 @@ class EndpointConnectionStatsTest : ShouldSpec() {
 
                     val rrPacket = createRrPacket(lastSrTimestamp = 100, delaySinceLastSr = 50.ms)
 
-                    stats.rtcpPacketReceived(rrPacket, clock.instant().toEpochMilli())
+                    stats.rtcpPacketReceived(rrPacket, clock.instant())
                     context("the rtt") {
                         should("be updated correctly") {
                             mostRecentPublishedRtt shouldBe(10.0 plusOrMinus .1)
@@ -75,7 +75,7 @@ class EndpointConnectionStatsTest : ShouldSpec() {
                         val rrPacket = createRrPacket(lastSrTimestamp = 0, delaySinceLastSr = 50.ms)
                         clock.elapse(60.ms)
 
-                        stats.rtcpPacketReceived(rrPacket, clock.instant().toEpochMilli())
+                        stats.rtcpPacketReceived(rrPacket, clock.instant())
                         context("the rtt") {
                             should("be updated correctly") {
                                 mostRecentPublishedRtt shouldBe(10.0.plusOrMinus(.1))
@@ -87,7 +87,7 @@ class EndpointConnectionStatsTest : ShouldSpec() {
 
                         clock.elapse(60.ms)
 
-                        stats.rtcpPacketReceived(rrPacket, clock.instant().toEpochMilli())
+                        stats.rtcpPacketReceived(rrPacket, clock.instant())
 
                         // This case is indistinguishable from no SR being received
                         context("the rtt") {
@@ -102,7 +102,7 @@ class EndpointConnectionStatsTest : ShouldSpec() {
         context("when a report block is received for which we can't find an SR") {
             val rrPacket = createRrPacket(lastSrTimestamp = 100, delaySinceLastSr = 50.ms)
 
-            stats.rtcpPacketReceived(rrPacket, clock.instant().toEpochMilli())
+            stats.rtcpPacketReceived(rrPacket, clock.instant())
 
             context("the rtt") {
                 should("not have been updated") {
@@ -117,7 +117,7 @@ class EndpointConnectionStatsTest : ShouldSpec() {
                 run {
                     stats.rtcpPacketReceived(
                         createRrPacket(lastSrTimestamp = 0, delaySinceLastSr = 50.ms),
-                        clock.instant().toEpochMilli()
+                        clock.instant()
                     )
                 }
             }.run()

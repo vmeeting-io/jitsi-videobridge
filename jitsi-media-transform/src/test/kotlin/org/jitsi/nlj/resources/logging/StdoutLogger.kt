@@ -16,11 +16,11 @@
 
 package org.jitsi.nlj.resources.logging
 
-import java.util.function.Supplier
-import java.util.logging.Level
 import org.jitsi.utils.logging2.LogContext
 import org.jitsi.utils.logging2.Logger
+import java.util.function.Supplier
 import java.util.logging.Handler
+import java.util.logging.Level
 
 /**
  * Logger which logs all messages to stdout (but obeys a set log level).  By default
@@ -38,11 +38,11 @@ class StdoutLogger(
     override fun createChildLogger(name: String, context: MutableMap<String, String>): Logger =
         StdoutLogger(name, _level, context)
 
-    override fun addContext(key: String?, value: String?) {
+    override fun addContext(key: String, value: String) {
         context.addContext(key, value)
     }
 
-    override fun addContext(addedContext: MutableMap<String, String>?) {
+    override fun addContext(addedContext: MutableMap<String, String>) {
         context.addContext(addedContext)
     }
 
@@ -131,6 +131,7 @@ class StdoutLogger(
     override fun setLevel(level: Level) {
         _level = level
     }
+
     /* These can be stubs */
     override fun setUseParentHandlers(useParentHandlers: Boolean) = Unit
     override fun addHandler(handler: Handler?) = Unit

@@ -17,13 +17,9 @@
 package org.jitsi.nlj.dtls
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings
-import java.nio.ByteBuffer
-import java.util.Hashtable
-import java.util.Vector
 import org.bouncycastle.crypto.util.PrivateKeyFactory
 import org.bouncycastle.tls.Certificate
 import org.bouncycastle.tls.CertificateRequest
-import org.bouncycastle.tls.CipherSuite
 import org.bouncycastle.tls.ClientCertificateType
 import org.bouncycastle.tls.DefaultTlsServer
 import org.bouncycastle.tls.ExporterLabel
@@ -43,10 +39,13 @@ import org.bouncycastle.tls.crypto.impl.bc.BcDefaultTlsCredentialedSigner
 import org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto
 import org.jitsi.nlj.srtp.SrtpConfig
 import org.jitsi.nlj.srtp.SrtpUtil
-import org.jitsi.utils.logging2.cinfo
-import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.rtp.extensions.toHex
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cinfo
+import org.jitsi.utils.logging2.createChildLogger
+import java.nio.ByteBuffer
+import java.util.Hashtable
+import java.util.Vector
 
 @SuppressFBWarnings(
     value = ["NP_ALWAYS_NULL"],
@@ -62,8 +61,6 @@ class TlsServerImpl(
 ) : DefaultTlsServer(BC_TLS_CRYPTO) {
 
     private val logger = createChildLogger(parentLogger)
-
-    private val config = DtlsConfig()
 
     private var session: TlsSession? = null
 
@@ -101,12 +98,7 @@ class TlsServerImpl(
             DtlsUtils.chooseSrtpProtectionProfile(SrtpConfig.protectionProfiles, protectionProfiles.asIterable())
     }
 
-    override fun getCipherSuites(): IntArray {
-        return intArrayOf(
-            CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
-        )
-    }
+    override fun getCipherSuites() = DtlsConfig.config.cipherSuites.toIntArray()
 
     override fun getRSAEncryptionCredentials(): TlsCredentialedDecryptor {
         return BcDefaultTlsCredentialedDecryptor(
@@ -129,30 +121,14 @@ class TlsServerImpl(
     override fun getCertificateRequest(): CertificateRequest {
         val signatureAlgorithms = Vector<SignatureAndHashAlgorithm>(1)
         signatureAlgorithms.add(SignatureAndHashAlgorithm(HashAlgorithm.sha256, SignatureAlgorithm.ecdsa))
-        signatureAlgorithms.add(SignatureAndHashAlgorithm(HashAlgorithm.sha1, SignatureAlgorithm.rsa))
-        return when (context.clientVersion) {
-            ProtocolVersion.DTLSv10 -> {
-                CertificateRequest(
-                    shortArrayOf(ClientCertificateType.rsa_sign),
-                    null,
-                    null
-                )
-            }
-            ProtocolVersion.DTLSv12 -> {
-                CertificateRequest(
-                    shortArrayOf(ClientCertificateType.ecdsa_sign),
-                    signatureAlgorithms,
-                    null
-                )
-            }
-            else -> throw DtlsUtils.DtlsException("Unsupported version: ${context.clientVersion}")
-        }
+        return CertificateRequest(shortArrayOf(ClientCertificateType.ecdsa_sign), signatureAlgorithms, null)
     }
 
-    override fun getHandshakeTimeoutMillis(): Int = config.handshakeTimeout.toMillis().toInt()
+    override fun getHandshakeTimeoutMillis(): Int = DtlsUtils.config.handshakeTimeout.toMillis().toInt()
 
     override fun notifyHandshakeComplete() {
         super.notifyHandshakeComplete()
+        logger.cinfo { "Negotiated DTLS version ${context.securityParameters.negotiatedVersion}" }
         context.resumableSession?.let { newSession ->
             val newSessionIdHex = ByteBuffer.wrap(newSession.sessionID).toHex()
 
@@ -190,18 +166,11 @@ class TlsServerImpl(
         notifyClientCertificateReceived(clientCertificate)
     }
 
-    override fun notifyClientVersion(clientVersion: ProtocolVersion?) {
-        super.notifyClientVersion(clientVersion)
-
-        logger.cinfo { "Negotiated DTLS version $clientVersion" }
-    }
-
     override fun notifyAlertRaised(alertLevel: Short, alertDescription: Short, message: String?, cause: Throwable?) =
         logger.notifyAlertRaised(alertLevel, alertDescription, message, cause)
 
     override fun notifyAlertReceived(alertLevel: Short, alertDescription: Short) =
         logger.notifyAlertReceived(alertLevel, alertDescription)
 
-    override fun getSupportedVersions(): Array<ProtocolVersion> =
-        ProtocolVersion.DTLSv12.downTo(ProtocolVersion.DTLSv10)
+    override fun getSupportedVersions(): Array<ProtocolVersion> = arrayOf(ProtocolVersion.DTLSv12)
 }

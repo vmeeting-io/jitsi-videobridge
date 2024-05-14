@@ -15,11 +15,6 @@
  */
 package org.jitsi.nlj.transform.node
 
-import java.time.Duration
-import java.util.concurrent.ConcurrentHashMap
-import java.util.function.Predicate
-import kotlin.properties.Delegates
-import kotlin.streams.toList
 import org.jitsi.nlj.Event
 import org.jitsi.nlj.EventHandler
 import org.jitsi.nlj.PacketHandler
@@ -34,7 +29,11 @@ import org.jitsi.nlj.util.PacketPredicate
 import org.jitsi.nlj.util.addMbps
 import org.jitsi.nlj.util.addRatio
 import org.json.simple.JSONObject
+import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.function.Predicate
+import kotlin.properties.Delegates
 
 /**
  * An abstract base class for all [Node] subclasses.  This class
@@ -49,6 +48,7 @@ sealed class Node(
 
     private var nextNode: Node? = null
     private val inputNodes: MutableList<Node> by lazy { mutableListOf<Node>() }
+
     // Create these once here so we don't allocate a new string every time
     protected val nodeEntryString = "Entered node $name"
     protected val nodeExitString = "Exited node $name"
@@ -115,6 +115,7 @@ sealed class Node(
             nextNode?.processPacket(packetInfo)
         }
     }
+
     /**
      * This function must be implemented by leaf nodes, as
      * ```
@@ -129,8 +130,12 @@ sealed class Node(
     abstract fun trace(f: () -> Unit)
 
     companion object {
+        @field:Suppress("ktlint:standard:property-naming")
         var TRACE_ENABLED = false
+
+        @field:Suppress("ktlint:standard:property-naming")
         var PLUGINS_ENABLED = false
+
         // 'Plugins' are observers which, when enabled, will be passed every packet that passes through
         // every node
         val plugins: MutableSet<NodePlugin> = mutableSetOf()
@@ -515,7 +520,7 @@ abstract class DemuxerNode(name: String) : StatsKeepingNode("$name demuxer") {
         }
     }
 
-    override fun getChildren(): Collection<Node> = transformPaths.stream().map(ConditionalPacketPath::path).toList()
+    override fun getChildren(): Collection<Node> = transformPaths.map { it.path }
 
     override fun getNodeStats(): NodeStatsBlock {
         val superStats = super.getNodeStats()

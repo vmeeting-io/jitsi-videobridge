@@ -17,20 +17,19 @@
 package org.jitsi.nlj.rtcp
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldHaveSize
-import io.mockk.spyk
+import io.kotest.matchers.shouldBe
 import org.jitsi.nlj.resources.logging.StdoutLogger
-import org.jitsi.test.concurrent.FakeScheduledExecutorService
 import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.RtcpFbNackPacket
+import org.jitsi.utils.concurrent.FakeScheduledExecutorService
 
 class StreamPacketRequesterTest : ShouldSpec() {
     override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
 
-    private val scheduler: FakeScheduledExecutorService = spyk()
+    private val scheduler = FakeScheduledExecutorService()
 
     private val nackPacketsSent = mutableListOf<RtcpPacket>()
     private fun rtcpSender(rtcpPacket: RtcpPacket) {
@@ -38,7 +37,11 @@ class StreamPacketRequesterTest : ShouldSpec() {
     }
 
     private val streamPacketRequester = RetransmissionRequester.StreamPacketRequester(
-        123L, scheduler, scheduler.clock, ::rtcpSender, StdoutLogger()
+        123L,
+        scheduler,
+        scheduler.clock,
+        ::rtcpSender,
+        StdoutLogger()
     )
 
     init {
@@ -65,6 +68,12 @@ class StreamPacketRequesterTest : ShouldSpec() {
                         val nackPacket = nackPacketsSent.first() as RtcpFbNackPacket
                         nackPacket.missingSeqNums shouldContainExactly listOf(2)
                     }
+                }
+            }
+            context("and then receiving it again") {
+                streamPacketRequester.packetReceived(1)
+                should("not schedule any work") {
+                    scheduler.numPendingJobs() shouldBe 0
                 }
             }
         }

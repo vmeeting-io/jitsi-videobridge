@@ -49,11 +49,15 @@ class MediaSourceDesc
      * A string which identifies the owner of this source (e.g. the endpoint
      * which is the sender of the source).
      */
-    val owner: String? = null,
+    val owner: String,
     /**
      * A string which identifies this source.
      */
-    val sourceName: String? = null
+    val sourceName: String,
+    /**
+     * The {@link VideoType} signaled for this media source (defaulting to {@code CAMERA} if nothing has been signaled).
+     */
+    var videoType: VideoType = VideoType.CAMERA,
 ) {
     /**
      * Current single-list view of all the encodings' layers.
@@ -83,19 +87,21 @@ class MediaSourceDesc
     private fun updateLayerCache() {
         layersById.clear()
         layersByIndex.clear()
-        val layers_ = ArrayList<RtpLayerDesc>()
+        val tempLayers = ArrayList<RtpLayerDesc>()
 
         for (encoding in rtpEncodings) {
             for (layer in encoding.layers) {
                 layersById[encoding.encodingId(layer)] = layer
                 layersByIndex[layer.index] = layer
-                layers_.add(layer)
+                tempLayers.add(layer)
             }
         }
-        layers = Collections.unmodifiableList(layers_)
+        layers = Collections.unmodifiableList(tempLayers)
     }
 
-    init { updateLayerCache() }
+    init {
+        updateLayerCache()
+    }
 
     /**
      * Gets the last "stable" bitrate (in bps) of the encoding of the specified
@@ -122,29 +128,24 @@ class MediaSourceDesc
     fun hasRtpLayers(): Boolean = layers.isNotEmpty()
 
     @Synchronized
-    fun numRtpLayers(): Int =
-        layersByIndex.size
+    fun numRtpLayers(): Int = layersByIndex.size
 
     val primarySSRC: Long
         get() = rtpEncodings[0].primarySSRC
 
     @Synchronized
-    fun getRtpLayerByQualityIdx(idx: Int): RtpLayerDesc? =
-        layersByIndex[idx]
+    fun getRtpLayerByQualityIdx(idx: Int): RtpLayerDesc? = layersByIndex[idx]
 
     @Synchronized
-    fun findRtpLayerDesc(videoRtpPacket: VideoRtpPacket): RtpLayerDesc? {
+    fun findRtpLayerDescs(videoRtpPacket: VideoRtpPacket): Collection<RtpLayerDesc> {
         if (ArrayUtils.isNullOrEmpty(rtpEncodings)) {
-            return null
+            return emptyList()
         }
-        val encodingId = videoRtpPacket.getEncodingId()
-        val desc = layersById[encodingId]
-        return desc
+        return videoRtpPacket.getEncodingIds().mapNotNull { layersById[it] }
     }
 
     @Synchronized
-    fun findRtpEncodingDesc(ssrc: Long): RtpEncodingDesc? =
-        rtpEncodings.find { it.matches(ssrc) }
+    fun findRtpEncodingDesc(ssrc: Long): RtpEncodingDesc? = rtpEncodings.find { it.matches(ssrc) }
 
     @Synchronized
     fun setEncodingLayers(layers: Array<RtpLayerDesc>, ssrc: Long) {
@@ -158,13 +159,14 @@ class MediaSourceDesc
      */
     @Synchronized
     fun copy() = MediaSourceDesc(
-        Array(this.rtpEncodings.size) { i -> this.rtpEncodings[i].copy() }, this.owner, this.sourceName
+        Array(this.rtpEncodings.size) { i -> this.rtpEncodings[i].copy() },
+        this.owner,
+        this.sourceName,
+        this.videoType
     )
 
-    override fun toString(): String = buildString {
-        append("MediaSourceDesc ").append(hashCode()).append(" has encodings:\n  ")
-        append(rtpEncodings.joinToString(separator = "\n  "))
-    }
+    override fun toString(): String = "MediaSourceDesc[name=$sourceName owner=$owner, videoType=$videoType, " +
+        "encodings=${rtpEncodings.joinToString(",")}]"
 
     /**
      * Checks whether the given SSRC matches this source's [primarySSRC].
@@ -184,10 +186,14 @@ class MediaSourceDesc
  */
 fun Array<MediaSourceDesc>.copy() = Array(this.size) { i -> this[i].copy() }
 
-fun Array<MediaSourceDesc>.findRtpLayerDesc(packet: VideoRtpPacket): RtpLayerDesc? {
+fun Array<MediaSourceDesc>.findRtpLayerDescs(packet: VideoRtpPacket): Collection<RtpLayerDesc> {
+    return this.flatMap { it.findRtpLayerDescs(packet) }
+}
+
+fun Array<MediaSourceDesc>.findRtpEncodingId(packet: VideoRtpPacket): Int? {
     for (source in this) {
-        source.findRtpLayerDesc(packet)?.let {
-            return it
+        source.findRtpEncodingDesc(packet.ssrc)?.let {
+            return it.eid
         }
     }
     return null

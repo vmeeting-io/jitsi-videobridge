@@ -20,7 +20,7 @@ import io.kotest.core.spec.Spec
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeTypeOf
-import org.jitsi.config.useNewConfig
+import org.jitsi.config.withNewConfig
 import org.jitsi.metaconfig.MetaconfigSettings
 import org.jitsi.nlj.format.AudioRedPayloadType
 import org.jitsi.nlj.node.processPackets
@@ -28,6 +28,7 @@ import org.jitsi.nlj.transform.node.AudioRedHandler
 import org.jitsi.nlj.transform.node.RedPolicy
 import org.jitsi.nlj.util.StreamInformationStoreImpl
 import org.jitsi.rtp.rtp.RtpPacket
+import org.jitsi.utils.logging2.createLogger
 
 /**
  * Tests the handling and generation of RED packets with two simple streams. One is a stream of Opus packets with
@@ -35,14 +36,11 @@ import org.jitsi.rtp.rtp.RtpPacket
  * numbers and redundancy with distance 2 whenever available.
  */
 class AudioRedHandlerTest : ShouldSpec() {
+    val logger = createLogger()
     override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
-    override fun beforeSpec(spec: Spec) {
+    override suspend fun beforeSpec(spec: Spec) {
         super.beforeSpec(spec)
         MetaconfigSettings.cacheEnabled = false
-    }
-
-    private inline fun withNewConfig(config: String, block: () -> Unit) {
-        useNewConfig("new-${this::class.simpleName}", config, true, block)
     }
 
     private val streamInformationStore = StreamInformationStoreImpl()
@@ -50,8 +48,8 @@ class AudioRedHandlerTest : ShouldSpec() {
     init {
         context("Policy STRIP") {
             withNewConfig("jmt.audio.red.policy=STRIP") {
-                val redHandler = AudioRedHandler(streamInformationStore)
-                redHandler.config.policy shouldBe RedPolicy.STRIP
+                val redHandler = AudioRedHandler(streamInformationStore, logger)
+                AudioRedHandler.config.policy shouldBe RedPolicy.STRIP
 
                 context("Target supports RED") {
                     streamInformationStore.addRtpPayloadType(AudioRedPayloadType(112))
@@ -96,8 +94,8 @@ class AudioRedHandlerTest : ShouldSpec() {
                 jmt.audio.red.vad-only=false
                 """.trimIndent()
             ) {
-                val redHandler = AudioRedHandler(streamInformationStore)
-                redHandler.config.policy shouldBe RedPolicy.PROTECT_ALL
+                val redHandler = AudioRedHandler(streamInformationStore, logger)
+                AudioRedHandler.config.policy shouldBe RedPolicy.PROTECT_ALL
 
                 context("Target supports RED") {
                     streamInformationStore.addRtpPayloadType(AudioRedPayloadType(112))
@@ -201,7 +199,7 @@ class AudioRedHandlerTest : ShouldSpec() {
         packet4WasAvailable: Boolean
     ) {
         size shouldBe 6
-        map { it.sequenceNumber }.toList() shouldBe listOf(0, 1, 2, 3, /* 4 is lost */ 5, 6)
+        map { it.sequenceNumber }.toList() shouldBe listOf(0, 1, 2, 3, 5, 6) // 4 is lost
         forEach {
             it.payloadType shouldBe 112
             it.shouldBeTypeOf<RedAudioRtpPacket>()

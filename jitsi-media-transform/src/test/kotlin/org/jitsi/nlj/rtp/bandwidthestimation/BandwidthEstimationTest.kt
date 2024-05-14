@@ -17,8 +17,18 @@ package org.jitsi.nlj.rtp.bandwidthestimation
 
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.doubles.shouldBeBetween
-import io.mockk.spyk
-import org.jitsi.test.concurrent.FakeScheduledExecutorService
+import org.jitsi.nlj.util.Bandwidth
+import org.jitsi.nlj.util.DataSize
+import org.jitsi.nlj.util.NEVER
+import org.jitsi.nlj.util.atRate
+import org.jitsi.nlj.util.bits
+import org.jitsi.nlj.util.bps
+import org.jitsi.nlj.util.bytes
+import org.jitsi.nlj.util.mbps
+import org.jitsi.utils.concurrent.FakeScheduledExecutorService
+import org.jitsi.utils.logging.DiagnosticContext
+import org.jitsi.utils.logging.TimeSeriesLogger
+import org.jitsi.utils.logging2.LoggerImpl
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -28,17 +38,6 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlin.properties.Delegates
-import org.jitsi.nlj.util.Bandwidth
-import org.jitsi.nlj.util.DataSize
-import org.jitsi.nlj.util.NEVER
-import org.jitsi.nlj.util.atRate
-import org.jitsi.nlj.util.bits
-import org.jitsi.nlj.util.bps
-import org.jitsi.nlj.util.bytes
-import org.jitsi.nlj.util.mbps
-import org.jitsi.utils.logging.DiagnosticContext
-import org.jitsi.utils.logging.TimeSeriesLogger
-import org.jitsi.utils.logging2.LoggerImpl
 
 /** A simulated packet, for bandwidth estimation testing. */
 data class SimulatedPacket(
@@ -58,7 +57,7 @@ abstract class FixedRateSender(
     var running = false
 
     var rate: Bandwidth by Delegates.observable(0.bps) {
-        _, _, _ ->
+            _, _, _ ->
         nextPacket?.cancel(false)
         schedulePacket(false)
     }
@@ -204,7 +203,7 @@ class PacketReceiver(
 }
 
 class BandwidthEstimationTest : ShouldSpec() {
-    private val scheduler: FakeScheduledExecutorService = spyk()
+    private val scheduler = FakeScheduledExecutorService()
     private val clock: Clock = scheduler.clock
 
     private val ctx = DiagnosticContext(clock)

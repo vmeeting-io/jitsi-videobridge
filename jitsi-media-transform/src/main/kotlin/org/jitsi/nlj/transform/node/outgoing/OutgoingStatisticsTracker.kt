@@ -15,14 +15,14 @@
  */
 package org.jitsi.nlj.transform.node.outgoing
 
-import java.util.concurrent.ConcurrentHashMap
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.rtp.AudioRtpPacket
 import org.jitsi.nlj.rtp.VideoRtpPacket
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.ObserverNode
-import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.rtp.rtp.RtpPacket
+import org.jitsi.utils.OrderedJsonObject
+import java.util.concurrent.ConcurrentHashMap
 
 class OutgoingStatisticsTracker : ObserverNode("Outgoing statistics tracker") {
     /**
@@ -84,7 +84,7 @@ class OutgoingStatisticsSnapshot(
     val ssrcStats: Map<Long, OutgoingSsrcStats.Snapshot>
 ) {
     fun toJson() = OrderedJsonObject().apply {
-        ssrcStats.forEach() { (ssrc, snapshot) ->
+        ssrcStats.forEach { (ssrc, snapshot) ->
             put(ssrc, snapshot.toJson())
         }
     }
@@ -94,6 +94,7 @@ class OutgoingSsrcStats(
     private val ssrc: Long
 ) {
     private var statsLock = Any()
+
     // Start variables protected by statsLock
     private var packetCount: Int = 0
     private var octetCount: Int = 0

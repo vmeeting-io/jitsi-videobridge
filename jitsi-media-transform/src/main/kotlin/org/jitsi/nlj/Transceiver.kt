@@ -19,6 +19,7 @@ import org.jitsi.nlj.format.PayloadType
 import org.jitsi.nlj.rtcp.RtcpEventNotifier
 import org.jitsi.nlj.rtp.RtpExtension
 import org.jitsi.nlj.rtp.bandwidthestimation.BandwidthEstimator
+import org.jitsi.nlj.srtp.SrtpTransformers
 import org.jitsi.nlj.srtp.SrtpUtil
 import org.jitsi.nlj.srtp.TlsRole
 import org.jitsi.nlj.stats.EndpointConnectionStats
@@ -42,7 +43,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.ScheduledExecutorService
 
 // This is an API class, so its usages will largely be outside of this library
-@Suppress("unused")
 /**
  * Handles all packets (incoming and outgoing) for a particular stream.
  * (TODO: 'stream' defined as what, exactly, here?)
@@ -55,6 +55,7 @@ import java.util.concurrent.ScheduledExecutorService
  * have the one thread just read from the queue and send, rather than that thread
  * having to read from a bunch of individual queues)
  */
+@Suppress("unused")
 class Transceiver(
     private val id: String,
     receiverExecutor: ExecutorService,
@@ -79,15 +80,23 @@ class Transceiver(
     private val endpointConnectionStats = EndpointConnectionStats(logger)
     private val streamInformationStore = StreamInformationStoreImpl()
     val readOnlyStreamInformationStore: ReadOnlyStreamInformationStore = streamInformationStore
+
     /**
      * A central place to subscribe to be notified on the reception or transmission of RTCP packets for
      * this transceiver.  This is intended to be used by internal entities: mainly logic for things like generating
      * SRs and RRs and calculating RTT.  Since it is used for both send and receive, it is held here and passed to
      * the sender and receive so each can push or subscribe to updates.
      */
-    private val rtcpEventNotifier = RtcpEventNotifier()
+    val rtcpEventNotifier = RtcpEventNotifier()
 
     private var mediaSources = MediaSources()
+
+    var srtpTransformers: SrtpTransformers? = null
+
+    /** Whether the srtpTransformers were created inside this object, or passed in externally.
+     * For external transformers it's the external owner's responsibility to close them.
+     */
+    var internalTransformers = false
 
     /**
      * Whether this [Transceiver] is receiving audio from the remote endpoint.
@@ -115,7 +124,7 @@ class Transceiver(
                 if (rtcpPacket.length >= 1500) {
                     logger.warn(
                         "Sending large locally-generated RTCP packet of size ${rtcpPacket.length}, " +
-                            "first packet of type ${rtcpPacket.packetType}."
+                            "first packet of type ${rtcpPacket.packetType} rc ${rtcpPacket.reportCount}."
                     )
                 }
                 rtpSender.processPacket(PacketInfo(rtcpPacket))
@@ -137,6 +146,9 @@ class Transceiver(
                 }
             }
         )
+
+        rtpReceiver.addLossListener(endpointConnectionStats.incomingLossTracker)
+        rtpSender.addLossListener(endpointConnectionStats.outgoingLossTracker)
 
         rtcpEventNotifier.addRtcpEventListener(endpointConnectionStats)
 
@@ -201,10 +213,15 @@ class Transceiver(
 
     fun receivesSsrc(ssrc: Long): Boolean = streamInformationStore.receiveSsrcs.contains(ssrc)
 
+    val receiveSsrcs: Set<Long>
+        get() = streamInformationStore.receiveSsrcs
+
     fun setMediaSources(mediaSources: Array<MediaSourceDesc>): Boolean {
         logger.cdebug { "$id setting media sources: ${mediaSources.joinToString()}" }
         val ret = this.mediaSources.setMediaSources(mediaSources)
-        rtpReceiver.handleEvent(SetMediaSourcesEvent(this.mediaSources.getMediaSources()))
+        val mergedMediaSources = this.mediaSources.getMediaSources()
+        val signaledMediaSources = mediaSources.copy()
+        rtpReceiver.handleEvent(SetMediaSourcesEvent(mergedMediaSources, signaledMediaSources))
         return ret
     }
 
@@ -239,6 +256,10 @@ class Transceiver(
 //        rtpExtensions.clear()
     }
 
+    fun setExtmapAllowMixed(allow: Boolean) {
+        streamInformationStore.setExtmapAllowMixed(allow)
+    }
+
     // TODO(brian): we may want to handle local and remote ssrc associations differently, as different parts of the
     // code care about one or the other, but currently there is no issue treating them the same.
     fun addSsrcAssociation(ssrcAssociation: SsrcAssociation) {
@@ -249,24 +270,36 @@ class Transceiver(
         streamInformationStore.addSsrcAssociation(ssrcAssociation)
     }
 
-    fun setSrtpInformation(chosenSrtpProtectionProfile: Int, tlsRole: TlsRole, keyingMaterial: ByteArray) {
+    fun setSrtpInformation(
+        chosenSrtpProtectionProfile: Int,
+        tlsRole: TlsRole,
+        keyingMaterial: ByteArray,
+        cryptex: Boolean
+    ) {
         val srtpProfileInfo =
             SrtpUtil.getSrtpProfileInformationFromSrtpProtectionProfile(chosenSrtpProtectionProfile)
         logger.cdebug {
             "Transceiver $id creating transformers with:\n" +
                 "profile info:\n$srtpProfileInfo\n" +
-                "tls role: $tlsRole"
+                "tls role: $tlsRole\n" +
+                "cryptex: $cryptex"
         }
-        val srtpTransformers = SrtpUtil.initializeTransformer(
+        srtpTransformers = SrtpUtil.initializeTransformer(
             srtpProfileInfo,
             keyingMaterial,
             tlsRole,
+            cryptex,
             logger
-        )
+        ).also { setSrtpInformationInternal(it, true) }
+    }
 
+    private fun setSrtpInformationInternal(srtpTransformers: SrtpTransformers, internal: Boolean) {
         rtpReceiver.setSrtpTransformers(srtpTransformers)
         rtpSender.setSrtpTransformers(srtpTransformers)
+        internalTransformers = internal
     }
+
+    fun setSrtpInformation(srtpTransformers: SrtpTransformers) = setSrtpInformationInternal(srtpTransformers, false)
 
     /**
      * Forcibly mute or unmute the incoming audio stream
@@ -306,8 +339,7 @@ class Transceiver(
     fun getTransceiverStats(): TransceiverStats {
         return TransceiverStats(
             endpointConnectionStats.getSnapshot(),
-            rtpReceiver.getStreamStats(),
-            rtpReceiver.getPacketStreamStats(),
+            rtpReceiver.getStats(),
             rtpSender.getStreamStats(),
             rtpSender.getPacketStreamStats(),
             rtpSender.bandwidthEstimator.getStats(clock.instant()),
@@ -323,6 +355,9 @@ class Transceiver(
     override fun stop() {
         rtpReceiver.stop()
         rtpSender.stop()
+        if (internalTransformers) {
+            srtpTransformers?.close()
+        }
     }
 
     fun teardown() {

@@ -16,7 +16,7 @@
 
 package org.jitsi.nlj.test_utils
 
-import org.jitsi.test.time.FakeClock
+import org.jitsi.utils.time.FakeClock
 import java.time.Duration
 import java.time.Instant
 
@@ -40,5 +40,4 @@ internal class TimelineTest(private val clock: FakeClock) {
     }
 }
 
-internal fun timeline(clock: FakeClock, block: TimelineTest.() -> Unit): TimelineTest =
-    TimelineTest(clock).apply(block)
+internal fun timeline(clock: FakeClock, block: TimelineTest.() -> Unit): TimelineTest = TimelineTest(clock).apply(block)

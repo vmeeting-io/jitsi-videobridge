@@ -15,11 +15,11 @@
  */
 package org.jitsi.nlj
 
+import org.jitsi.nlj.rtp.LossListener
 import org.jitsi.nlj.srtp.SrtpTransformers
 import org.jitsi.nlj.stats.EndpointConnectionStats
-import org.jitsi.nlj.stats.PacketStreamStats
+import org.jitsi.nlj.stats.RtpReceiverStats
 import org.jitsi.nlj.transform.NodeStatsProducer
-import org.jitsi.nlj.transform.node.incoming.IncomingStatisticsSnapshot
 import org.jitsi.nlj.util.Bandwidth
 
 abstract class RtpReceiver :
@@ -34,6 +34,7 @@ abstract class RtpReceiver :
      * input chain).
      */
     abstract var packetHandler: PacketHandler?
+
     /**
      * Enqueue an incoming packet to be processed
      */
@@ -44,14 +45,14 @@ abstract class RtpReceiver :
      */
     abstract fun setSrtpTransformers(srtpTransformers: SrtpTransformers)
 
-    abstract fun getStreamStats(): IncomingStatisticsSnapshot
-
-    abstract fun getPacketStreamStats(): PacketStreamStats.Snapshot
+    abstract fun getStats(): RtpReceiverStats
 
     abstract fun tearDown()
 
     abstract fun isReceivingAudio(): Boolean
     abstract fun isReceivingVideo(): Boolean
+
+    abstract fun addLossListener(lossListener: LossListener)
 
     abstract fun setFeature(feature: Features, enabled: Boolean)
     abstract fun isFeatureEnabled(feature: Features): Boolean
@@ -68,7 +69,8 @@ interface RtpReceiverEventHandler {
     /**
      * We received an audio level indication from the remote endpoint.
      */
-    fun audioLevelReceived(sourceSsrc: Long, level: Long) {}
+    fun audioLevelReceived(sourceSsrc: Long, level: Long): Boolean = false
+
     /**
      * The estimation of the available send bandwidth changed.
      */

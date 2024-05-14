@@ -16,27 +16,30 @@
 package org.jitsi.nlj
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings
-import java.time.Duration
 import org.jitsi.rtp.Packet
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
 import java.util.Collections
 
 @SuppressFBWarnings("CN_IMPLEMENTS_CLONE_BUT_NOT_CLONEABLE")
 class EventTimeline(
-    private val timeline: MutableList<Pair<String, Long>> = mutableListOf()
-) : Iterable<Pair<String, Long>> {
+    private val timeline: MutableList<Pair<String, Duration>> = mutableListOf(),
+    private val clock: Clock = Clock.systemUTC()
+) : Iterable<Pair<String, Duration>> {
     /**
      * The [referenceTime] refers to the first timestamp we have
      * in the timeline.  In the timeline this is used as time "0" and
      * all other times are represented as deltas from this 0.
      */
-    var referenceTime: Long? = null
+    var referenceTime: Instant? = null
 
     fun addEvent(desc: String) {
-        val now = System.currentTimeMillis()
+        val now = clock.instant()
         if (referenceTime == null) {
             referenceTime = now
         }
-        timeline.add(desc to (now - referenceTime!!))
+        timeline.add(desc to Duration.between(referenceTime, now))
     }
 
     fun clone(): EventTimeline {
@@ -45,7 +48,7 @@ class EventTimeline(
         return clone
     }
 
-    override fun iterator(): Iterator<Pair<String, Long>> = timeline.iterator()
+    override fun iterator(): Iterator<Pair<String, Duration>> = timeline.iterator()
 
     /**
      * Return the total time between this packet's first event and last event
@@ -53,14 +56,14 @@ class EventTimeline(
      */
     fun totalDelay(): Duration {
         return referenceTime?.let {
-            return Duration.ofMillis(timeline.last().second)
+            return timeline.last().second
         } ?: Duration.ofMillis(-1)
     }
 
     override fun toString(): String {
         return with(StringBuffer()) {
             referenceTime?.let {
-                append("Reference time: ${referenceTime}ms; ")
+                append("Reference time: $referenceTime; ")
                 append(timeline.joinToString(separator = "; "))
             } ?: run {
                 append("[No timeline]")
@@ -79,19 +82,24 @@ class EventTimeline(
 @SuppressFBWarnings("CN_IMPLEMENTS_CLONE_BUT_NOT_CLONEABLE")
 open class PacketInfo @JvmOverloads constructor(
     var packet: Packet,
+    /** The original length of the packet, i.e. before decryption.  Stays unchanged even if the packet is updated. */
+    val originalLength: Int = packet.length,
     val timeline: EventTimeline = EventTimeline()
 ) {
     /**
      * An explicit tag for when this packet was originally received (assuming it
      * was an incoming packet and not one created by jvb itself).
      */
-    var receivedTime: Long = -1L
+    var receivedTime: Instant? = null
         set(value) {
             field = value
             if (ENABLE_TIMELINE && timeline.referenceTime == null) {
                 timeline.referenceTime = value
             }
         }
+
+    /** Whether the packet originally had cryptex RTP header extensions. */
+    var originalHadCryptex: Boolean = false
 
     /**
      * Whether this packet has been recognized to contain only shouldDiscard.
@@ -138,19 +146,20 @@ open class PacketInfo @JvmOverloads constructor(
      */
     fun clone(): PacketInfo {
         val clone = if (ENABLE_TIMELINE) {
-            PacketInfo(packet.clone(), timeline.clone())
+            PacketInfo(packet.clone(), originalLength, timeline.clone())
         } else {
             // If the timeline isn't enabled, we can just share the same one.
             // (This would change if we allowed enabling the timeline at runtime)
-            PacketInfo(packet.clone(), timeline)
+            PacketInfo(packet.clone(), originalLength, timeline)
         }
         clone.receivedTime = receivedTime
+        clone.originalHadCryptex = originalHadCryptex
         clone.shouldDiscard = shouldDiscard
         clone.endpointId = endpointId
         clone.layeringChanged = layeringChanged
         clone.payloadVerification = payloadVerification
-        @Suppress("UNCHECKED_CAST") /* ArrayList.clone() really does return ArrayList, not Object. */
-        clone.onSentActions = onSentActions?.clone() as ArrayList<()->Unit>?
+        @Suppress("UNCHECKED_CAST") // ArrayList.clone() really does return ArrayList, not Object.
+        clone.onSentActions = onSentActions?.clone() as ArrayList<() -> Unit>?
         return clone
     }
 
@@ -189,7 +198,10 @@ open class PacketInfo @JvmOverloads constructor(
     fun sent() {
         var actions: List<() -> Unit> = Collections.emptyList()
         synchronized(this) {
-            onSentActions?.let { actions = it; onSentActions = null } ?: run { return@sent }
+            onSentActions?.let {
+                actions = it
+                onSentActions = null
+            } ?: run { return@sent }
         }
         for (action in actions) {
             action.invoke()
@@ -203,6 +215,7 @@ open class PacketInfo @JvmOverloads constructor(
         /**
          * If this is enabled all [Node]s will verify that the payload didn't unexpectedly change. This is expensive.
          */
+        @field:Suppress("ktlint:standard:property-naming")
         var ENABLE_PAYLOAD_VERIFICATION = false
     }
 }

@@ -16,9 +16,9 @@
 
 package org.jitsi.nlj.codec.vp8
 
-import java.nio.ByteBuffer
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi_modified.impl.neomedia.codec.video.vp8.DePacketizer
+import java.nio.ByteBuffer
 
 class Vp8Utils {
     companion object {
@@ -63,7 +63,8 @@ class Vp8Utils {
                     vp8Packet.payloadLength
                 )
             return DePacketizer.VP8KeyframeHeader.getHeight(
-                vp8Packet.buffer, vp8Packet.payloadOffset + payloadDescriptorLen + VP8_PAYLOAD_HEADER_LEN
+                vp8Packet.buffer,
+                vp8Packet.payloadOffset + payloadDescriptorLen + VP8_PAYLOAD_HEADER_LEN
             )
         }
 
@@ -78,14 +79,16 @@ class Vp8Utils {
             }
         }
 
-        fun getTemporalLayerIdOfFrame(vp8Payload: ByteBuffer) =
-            DePacketizer.VP8PayloadDescriptor.getTemporalLayerIndex(
-                vp8Payload.array(), vp8Payload.arrayOffset(), vp8Payload.limit()
-            )
+        fun getTemporalLayerIdOfFrame(vp8Payload: ByteBuffer) = DePacketizer.VP8PayloadDescriptor.getTemporalLayerIndex(
+            vp8Payload.array(),
+            vp8Payload.arrayOffset(),
+            vp8Payload.limit()
+        )
 
-        fun getTemporalLayerIdOfFrame(vp8Packet: RtpPacket) =
-            DePacketizer.VP8PayloadDescriptor.getTemporalLayerIndex(
-                vp8Packet.buffer, vp8Packet.payloadOffset, vp8Packet.payloadLength
-            )
+        fun getTemporalLayerIdOfFrame(vp8Packet: RtpPacket) = DePacketizer.VP8PayloadDescriptor.getTemporalLayerIndex(
+            vp8Packet.buffer,
+            vp8Packet.payloadOffset,
+            vp8Packet.payloadLength
+        )
     }
 }

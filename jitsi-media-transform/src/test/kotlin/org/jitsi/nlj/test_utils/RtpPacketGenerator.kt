@@ -18,14 +18,15 @@ package org.jitsi.nlj.test_utils
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.util.Bandwidth
 import org.jitsi.nlj.util.DataSize
-import org.jitsi.nlj.util.`in`
 import org.jitsi.nlj.util.atRate
 import org.jitsi.nlj.util.howMuchCanISendAtRate
+import org.jitsi.nlj.util.`in`
 import org.jitsi.rtp.rtp.RtpPacket
-import org.jitsi.test.time.FakeClock
 import org.jitsi.utils.div
 import org.jitsi.utils.secs
+import org.jitsi.utils.time.FakeClock
 import java.time.Duration
+import java.time.Instant
 
 class RtpPacketGenerator internal constructor(
     /**
@@ -85,7 +86,7 @@ class RtpPacketGenerator internal constructor(
         clock = clock
     )
 
-    private fun createPacket(seq: Int, len: Int, packetSsrc: Long, pt: Int, receivedTime: Long): PacketInfo {
+    private fun createPacket(seq: Int, len: Int, packetSsrc: Long, pt: Int, receivedTime: Instant): PacketInfo {
         val dummyPacket = RtpPacket(ByteArray(len), 0, len).apply {
             version = 2
             hasPadding = false
@@ -120,7 +121,7 @@ class RtpPacketGenerator internal constructor(
                             len = length.bytes.toInt(),
                             packetSsrc = ssrc,
                             pt = payloadType,
-                            receivedTime = clock.millis()
+                            receivedTime = clock.instant()
                         )
                     )
                 }

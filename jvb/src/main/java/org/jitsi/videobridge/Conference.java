@@ -305,7 +305,6 @@ public class Conference
         if (conferenceName != null)
         {
             DiagnosticContext diagnosticContext = new DiagnosticContext();
-            diagnosticContext.put("conf_id", (gid == GID_NOT_SET)? id : gid);
             diagnosticContext.put("conf_name", conferenceName.toString());
             diagnosticContext.put("conf_creation_time_ms", creationTime);
             return diagnosticContext;

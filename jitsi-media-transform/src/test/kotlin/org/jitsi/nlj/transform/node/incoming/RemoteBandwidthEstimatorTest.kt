@@ -16,16 +16,15 @@
 package org.jitsi.nlj.transform.node.incoming
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
-import io.kotest.matchers.shouldNotBe
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.matchers.comparables.shouldBeGreaterThan
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import org.jitsi.nlj.format.Vp8PayloadType
 import org.jitsi.nlj.format.Vp9PayloadType
 import org.jitsi.nlj.resources.logging.StdoutLogger
 import org.jitsi.nlj.rtp.RtpExtension
 import org.jitsi.nlj.rtp.RtpExtensionType
-import org.jitsi.test.time.FakeClock
 import org.jitsi.nlj.test_utils.RtpPacketGenerator
 import org.jitsi.nlj.util.Bandwidth
 import org.jitsi.nlj.util.StreamInformationStoreImpl
@@ -33,6 +32,7 @@ import org.jitsi.nlj.util.mbps
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi.rtp.rtp.header_extensions.AbsSendTimeHeaderExtension
 import org.jitsi.utils.secs
+import org.jitsi.utils.time.FakeClock
 import java.time.Duration
 
 class RemoteBandwidthEstimatorTest : ShouldSpec() {
@@ -40,6 +40,7 @@ class RemoteBandwidthEstimatorTest : ShouldSpec() {
 
     private val clock: FakeClock = FakeClock()
     private val astExtensionId = 3
+
     // REMB is enabled by having at least one payload type which has "goog-remb" signaled as a rtcp-fb, and TCC is
     // disabled.
     private val vp8PayloadType = Vp8PayloadType(100, emptyMap(), setOf("goog-remb"))
@@ -97,7 +98,7 @@ class RemoteBandwidthEstimatorTest : ShouldSpec() {
         rtpPacketGenerator.generatePackets(ssrc = ssrc) {
             val ext =
                 it.packetAs<RtpPacket>().addHeaderExtension(astExtensionId, AbsSendTimeHeaderExtension.DATA_SIZE_BYTES)
-            AbsSendTimeHeaderExtension.setTime(ext, it.receivedTime * 1_000_000)
+            AbsSendTimeHeaderExtension.setTime(ext, it.receivedTime!!.toEpochMilli() * 1_000_000)
             remoteBandwidthEstimator.processPacket(it)
         }
     }

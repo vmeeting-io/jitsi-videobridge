@@ -22,6 +22,7 @@ import org.jitsi.nlj.util.BufferPool
 import org.jitsi.nlj.util.safeShutdown
 import org.jitsi.test_utils.Pcaps
 import org.jitsi.utils.secs
+import java.time.Clock
 import java.util.concurrent.Executors
 
 /**
@@ -58,19 +59,27 @@ fun main() {
     val executor = Executors.newSingleThreadExecutor()
 
     val sender = SenderFactory.createSender(
-        executor, backgroundExecutor, pcap.srtpData,
-        pcap.payloadTypes, pcap.headerExtensions, pcap.ssrcAssociations
+        executor,
+        backgroundExecutor,
+        pcap.srtpData,
+        pcap.payloadTypes,
+        pcap.headerExtensions,
+        pcap.ssrcAssociations
     )
 
     val receiver = ReceiverFactory.createReceiver(
-        executor, backgroundExecutor, pcap.srtpData,
-        pcap.payloadTypes, pcap.headerExtensions, pcap.ssrcAssociations,
+        executor,
+        backgroundExecutor,
+        pcap.srtpData,
+        pcap.payloadTypes,
+        pcap.headerExtensions,
+        pcap.ssrcAssociations,
         { rtcpPacket -> sender.processPacket(PacketInfo(rtcpPacket)) }
     )
 
     producer.subscribe { pkt ->
         val packetInfo = PacketInfo(pkt)
-        packetInfo.receivedTime = System.currentTimeMillis()
+        packetInfo.receivedTime = Clock.systemUTC().instant()
         receiver.enqueuePacket(packetInfo)
     }
 

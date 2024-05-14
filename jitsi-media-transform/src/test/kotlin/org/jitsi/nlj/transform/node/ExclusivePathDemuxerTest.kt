@@ -18,8 +18,8 @@ package org.jitsi.nlj.transform.node
 
 import io.kotest.core.spec.IsolationMode
 import io.kotest.core.spec.Spec
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
+import io.kotest.matchers.shouldBe
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.util.PacketPredicate
 import org.jitsi.rtp.rtcp.RtcpPacket
@@ -51,7 +51,7 @@ internal class ExclusivePathDemuxerTest : ShouldSpec() {
     private val rtpPacket = PacketInfo(RtpPacket(ByteArray(50), 0, 50))
     private val rtcpPacket = PacketInfo(DummyRtcpPacket())
 
-    override fun beforeSpec(spec: Spec) {
+    override suspend fun beforeSpec(spec: Spec) {
         super.beforeSpec(spec)
         rtpPath.name = "RTP"
         rtpPath.predicate = PacketPredicate { it is RtpPacket }

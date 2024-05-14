@@ -15,9 +15,9 @@
  */
 package org.jitsi.nlj.format
 
+import org.jitsi.utils.MediaType
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
-import org.jitsi.utils.MediaType
 
 typealias PayloadTypeParams = Map<String, String>
 
@@ -27,6 +27,7 @@ fun RtcpFeedbackSet.supportsPli(): Boolean = this.contains("nack pli")
 fun RtcpFeedbackSet.supportsFir(): Boolean = this.contains("ccm fir")
 fun RtcpFeedbackSet.supportsRemb(): Boolean = this.contains("goog-remb")
 fun RtcpFeedbackSet.supportsTcc(): Boolean = this.contains("transport-cc")
+
 /**
  * Represents an RTP payload type.
  *

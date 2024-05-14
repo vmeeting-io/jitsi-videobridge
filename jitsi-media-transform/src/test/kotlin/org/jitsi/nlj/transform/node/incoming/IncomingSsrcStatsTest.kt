@@ -17,15 +17,17 @@
 package org.jitsi.nlj.transform.node.incoming
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
+import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.rtp.rtp.RtpPacket
+import org.jitsi.utils.MediaType
+import java.time.Instant
 
 private data class StatPacketInfo(
     val packetInfo: PacketInfo,
-    val sentTimeMs: Long
+    val sentTime: Instant
 )
 
 private data class JitterPacketInfo(
@@ -36,8 +38,8 @@ private data class JitterPacketInfo(
 private fun createStatPacketInfo(seqNum: Int, sentTime: Long, receivedTime: Long): StatPacketInfo {
     val packetInfo = PacketInfo(RtpPacket(ByteArray(50), 0, 50))
     packetInfo.packetAs<RtpPacket>().sequenceNumber = seqNum
-    packetInfo.receivedTime = receivedTime
-    return StatPacketInfo(packetInfo, sentTime)
+    packetInfo.receivedTime = Instant.ofEpochMilli(receivedTime)
+    return StatPacketInfo(packetInfo, Instant.ofEpochMilli(sentTime))
 }
 
 private fun createJitterPacketInfo(
@@ -116,16 +118,17 @@ internal class IncomingSsrcStatsTest : ShouldSpec() {
             )
             val streamStatistics = IncomingSsrcStats(
                 123L,
-                packetSequence.first().packetInfo.packetAs<RtpPacket>().sequenceNumber
+                packetSequence.first().packetInfo.packetAs<RtpPacket>().sequenceNumber,
+                mediaType = MediaType.VIDEO
             )
             packetSequence.forEach {
                 streamStatistics.packetReceived(
-                    it.packetInfo.packetAs<RtpPacket>(),
-                    it.sentTimeMs,
-                    it.packetInfo.receivedTime
+                    it.packetInfo.packetAs(),
+                    it.sentTime,
+                    it.packetInfo.receivedTime!!
                 )
             }
-            val statSnapshot = streamStatistics.getSnapshot()
+            val statSnapshot = streamStatistics.getSnapshotIfActive()
             context("expected packets") {
                 should("be calculated correctly") {
                     statSnapshot?.numExpectedPackets shouldBe 17
@@ -138,7 +141,7 @@ internal class IncomingSsrcStatsTest : ShouldSpec() {
             }
             context("querying a second time with no update") {
                 should("be null") {
-                    streamStatistics.getSnapshot() shouldBe null
+                    streamStatistics.getSnapshotIfActive() shouldBe null
                 }
             }
 
@@ -148,14 +151,14 @@ internal class IncomingSsrcStatsTest : ShouldSpec() {
             packetSequence2.forEach {
                 streamStatistics.packetReceived(
                     it.packetInfo.packetAs<RtpPacket>(),
-                    it.sentTimeMs,
-                    it.packetInfo.receivedTime
+                    it.sentTime,
+                    it.packetInfo.receivedTime!!
                 )
             }
 
             context("querying after a new update") {
                 should("not be null") {
-                    streamStatistics.getSnapshot() shouldNotBe null
+                    streamStatistics.getSnapshotIfActive() shouldNotBe null
                 }
             }
         }

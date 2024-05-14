@@ -15,20 +15,23 @@
  */
 package org.jitsi.nlj.transform.node.incoming
 
-import java.util.concurrent.ConcurrentHashMap
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.format.RtxPayloadType
 import org.jitsi.nlj.stats.JitterStats
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.ObserverNode
-import org.jitsi.utils.OrderedJsonObject
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
 import org.jitsi.rtp.rtp.RtpPacket
-import org.jitsi.rtp.util.RtpUtils.Companion.convertRtpTimestampToMs
+import org.jitsi.rtp.util.RtpUtils.Companion.convertRtpTimestampToInstant
 import org.jitsi.rtp.util.isNewerThan
 import org.jitsi.rtp.util.isNextAfter
 import org.jitsi.rtp.util.numPacketsTo
 import org.jitsi.rtp.util.rolledOverTo
+import org.jitsi.utils.MediaType
+import org.jitsi.utils.OrderedJsonObject
+import java.time.Duration
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Track various statistics about received RTP streams to be used in SR/RR report blocks
@@ -40,14 +43,19 @@ class IncomingStatisticsTracker(
 
     override fun observe(packetInfo: PacketInfo) {
         val rtpPacket = packetInfo.packetAs<RtpPacket>()
-        streamInformationStore.rtpPayloadTypes[rtpPacket.payloadType.toByte()]?.let {
+        streamInformationStore.rtpPayloadTypes[rtpPacket.payloadType.toByte()]?.let { payloadType ->
             // We don't want to track jitter, etc. for RTX streams
-            if (it !is RtxPayloadType) {
+            if (payloadType !is RtxPayloadType) {
                 val stats = ssrcStats.computeIfAbsent(rtpPacket.ssrc) {
-                    IncomingSsrcStats(rtpPacket.ssrc, rtpPacket.sequenceNumber)
+                    IncomingSsrcStats(rtpPacket.ssrc, rtpPacket.sequenceNumber, payloadType.mediaType)
                 }
-                val packetSentTimestamp = convertRtpTimestampToMs(rtpPacket.timestamp.toInt(), it.clockRate)
-                stats.packetReceived(rtpPacket, packetSentTimestamp, packetInfo.receivedTime)
+                val packetSentTimestamp = convertRtpTimestampToInstant(
+                    rtpPacket.timestamp.toInt(),
+                    payloadType.clockRate
+                )
+                packetInfo.receivedTime?.let {
+                    stats.packetReceived(rtpPacket, packetSentTimestamp, it)
+                }
             }
         }
     }
@@ -68,13 +76,20 @@ class IncomingStatisticsTracker(
 
     override fun trace(f: () -> Unit) = f.invoke()
 
-    fun getSnapshot(): IncomingStatisticsSnapshot {
-        return IncomingStatisticsSnapshot(
-            ssrcStats.mapNotNull { (ssrc, stats) ->
-                stats.getSnapshot()?.let { Pair(ssrc, it) }
-            }.toMap()
-        )
-    }
+    /**
+     * Gets a snapshot of the SSRCs which have received a packet since the last call to this method. There is a single
+     * flag keeping track of activity, so this should not be used in more than one place. Currently, it is used for RR
+     * generation. Other code should use [getSnapshot].
+     */
+    fun getSnapshotOfActiveSsrcs() = IncomingStatisticsSnapshot(
+        ssrcStats.mapNotNull { (ssrc, stats) ->
+            stats.getSnapshotIfActive()?.let { Pair(ssrc, it) }
+        }.toMap()
+    )
+
+    fun getSnapshot() = IncomingStatisticsSnapshot(
+        ssrcStats.map { (ssrc, stats) -> Pair(ssrc, stats.getSnapshot()) }.toMap()
+    )
 }
 
 class IncomingStatisticsSnapshot(
@@ -84,7 +99,7 @@ class IncomingStatisticsSnapshot(
     val ssrcStats: Map<Long, IncomingSsrcStats.Snapshot>
 ) {
     fun toJson(): OrderedJsonObject = OrderedJsonObject().apply {
-        ssrcStats.forEach() { (ssrc, snapshot) ->
+        ssrcStats.forEach { (ssrc, snapshot) ->
             put(ssrc, snapshot.toJson())
         }
     }
@@ -98,7 +113,8 @@ class IncomingStatisticsSnapshot(
  */
 class IncomingSsrcStats(
     private val ssrc: Long,
-    private var baseSeqNum: Int
+    private var baseSeqNum: Int,
+    private val mediaType: MediaType
 ) {
     // TODO: for now we'll synchronize access to all the stats so we can create a consistent snapshot when it's
     // requested from another context.  it'd be great to be able to avoid this (coroutines make it easy to switch
@@ -119,6 +135,17 @@ class IncomingSsrcStats(
     private val jitterStats = JitterStats()
     private var numReceivedPackets: Int = 0
     private var numReceivedBytes: Int = 0
+
+    /** How long this SSRC has been active. */
+    private var durationActive = Duration.ZERO
+
+    /** The receiveTime of the last packet */
+    private var lastPacketReceivedTime: Instant? = null
+
+    /**
+     * Whether there has been any activity (packets received) since the last time the stats were queried with
+     * onlyActive = true.
+     */
     private var activitySinceLastSnapshot: Boolean = false
     // End variables protected by statsLock
 
@@ -132,6 +159,7 @@ class IncomingSsrcStats(
          * from the cumulative loss amount)
          */
         const val MAX_OOO_AMOUNT = 100
+
         /**
          * https://tools.ietf.org/html/rfc3550#appendix-A.1
          * "...a source is declared valid only after MIN_SEQUENTIAL packets have been received in
@@ -140,6 +168,12 @@ class IncomingSsrcStats(
         const val INITIAL_MIN_SEQUENTIAL = 2
 
         const val MAX_DROPOUT = 3000
+
+        /**
+         * The maximum delay between two packets that counts as activity (as opposed to the stream going inactive and
+         * back to active).
+         */
+        val ACTIVITY_TIMEOUT: Duration = Duration.ofMillis(1000)
 
         /**
          * Find how many packets we would expected to have received in the range [[baseSeqNum], [currSeqNum]], taking
@@ -159,18 +193,27 @@ class IncomingSsrcStats(
         }
     }
 
-    fun getSnapshot(): Snapshot? {
+    private fun createSnapshot() = Snapshot(
+        numReceivedPackets = numReceivedPackets,
+        numReceivedBytes = numReceivedBytes,
+        maxSeqNum = maxSeqNum,
+        seqNumCycles = seqNumCycles,
+        numExpectedPackets = numExpectedPackets,
+        cumulativePacketsLost = cumulativePacketsLost,
+        jitter = jitterStats.jitter,
+        durationActive = durationActive,
+        mediaType = mediaType
+    )
+
+    fun getSnapshotIfActive(): Snapshot? {
         synchronized(statsLock) {
-            if (!activitySinceLastSnapshot) {
-                return null
-            }
+            if (!activitySinceLastSnapshot) return null
             activitySinceLastSnapshot = false
-            return Snapshot(
-                numReceivedPackets, numReceivedBytes, maxSeqNum, seqNumCycles, numExpectedPackets,
-                cumulativePacketsLost, jitterStats.jitter
-            )
+            return createSnapshot()
         }
     }
+
+    fun getSnapshot(): Snapshot = synchronized(statsLock) { createSnapshot() }
 
     /**
      * Resets this [IncomingSsrcStats]'s tracking variables such that:
@@ -186,20 +229,24 @@ class IncomingSsrcStats(
 
     /**
      * Notify this [IncomingSsrcStats] instance that an RTP packet [packet] for the stream it is
-     * tracking has been received and that it: was sent at [packetSentTimestampMs] (note this is NOT the
+     * tracking has been received and that it: was sent at [packetSentTimestamp] (note this is NOT the
      * raw RTP timestamp, but the 'translated' timestamp which is a function of the RTP timestamp and the clockrate)
-     * and was received at [packetReceivedTimeMs]
+     * and was received at [packetReceivedTime]
      */
-    fun packetReceived(
-        packet: RtpPacket,
-        packetSentTimestampMs: Long,
-        packetReceivedTimeMs: Long
-    ) {
+    fun packetReceived(packet: RtpPacket, packetSentTimestamp: Instant, packetReceivedTime: Instant) {
         val packetSequenceNumber = packet.sequenceNumber
         synchronized(statsLock) {
             activitySinceLastSnapshot = true
             numReceivedPackets++
             numReceivedBytes += packet.length
+            if (lastPacketReceivedTime != null) {
+                val timeSincePreviousPacket = Duration.between(lastPacketReceivedTime, packetReceivedTime)
+                if (timeSincePreviousPacket < ACTIVITY_TIMEOUT) {
+                    durationActive += timeSincePreviousPacket
+                }
+            }
+            lastPacketReceivedTime = packetReceivedTime
+
             if (packetSequenceNumber isNewerThan maxSeqNum) {
                 if (packetSequenceNumber isNextAfter maxSeqNum) {
                     if (probation > 0) {
@@ -234,8 +281,8 @@ class IncomingSsrcStats(
             }
 
             jitterStats.addPacket(
-                packetSentTimestampMs,
-                packetReceivedTimeMs
+                packetSentTimestamp,
+                packetReceivedTime
             )
         }
     }
@@ -263,17 +310,20 @@ class IncomingSsrcStats(
         val seqNumCycles: Int = 0,
         val numExpectedPackets: Int = 0,
         val cumulativePacketsLost: Int = 0,
-        val jitter: Double = 0.0
+        val jitter: Double = 0.0,
+        val durationActive: Duration = Duration.ZERO,
+        val mediaType: MediaType
     ) {
         fun computeFractionLost(previousSnapshot: Snapshot): Int {
             val numExpectedPacketsInterval = numExpectedPackets - previousSnapshot.numExpectedPackets
             val numReceivedPacketsInterval = numReceivedPackets - previousSnapshot.numReceivedPackets
 
             val numLostPacketsInterval = numExpectedPacketsInterval - numReceivedPacketsInterval
-            return if (numExpectedPacketsInterval == 0 || numLostPacketsInterval <= 0)
+            return if (numExpectedPacketsInterval == 0 || numLostPacketsInterval <= 0) {
                 0
-            else
+            } else {
                 (((numLostPacketsInterval shl 8) / numExpectedPacketsInterval.toDouble())).toInt()
+            }
         }
 
         fun toJson() = OrderedJsonObject().apply {
@@ -284,6 +334,8 @@ class IncomingSsrcStats(
             put("num_expected_packets", numExpectedPackets)
             put("cumulative_packets_lost", cumulativePacketsLost)
             put("jitter", jitter)
+            put("duration_active_ms", durationActive.toMillis())
+            put("media_type", mediaType.toString())
         }
     }
 }

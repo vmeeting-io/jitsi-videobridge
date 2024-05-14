@@ -15,11 +15,8 @@
  */
 package org.jitsi.nlj.transform.node.incoming
 
-import java.time.Clock
-import java.time.Duration
-import java.time.Instant
-import java.util.TreeMap
 import org.jitsi.nlj.PacketInfo
+import org.jitsi.nlj.rtp.LossListener
 import org.jitsi.nlj.rtp.RtpExtensionType.TRANSPORT_CC
 import org.jitsi.nlj.stats.NodeStatsBlock
 import org.jitsi.nlj.transform.node.ObserverNode
@@ -28,17 +25,22 @@ import org.jitsi.nlj.util.NEVER
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
 import org.jitsi.nlj.util.Rfc3711IndexTracker
 import org.jitsi.nlj.util.bytes
-import org.jitsi.utils.logging2.cdebug
-import org.jitsi.utils.observableWhenChanged
+import org.jitsi.nlj.util.toEpochMicro
 import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.tcc.RtcpFbTccPacket
 import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.tcc.RtcpFbTccPacketBuilder
 import org.jitsi.rtp.rtp.RtpPacket
 import org.jitsi.rtp.rtp.header_extensions.TccHeaderExtension
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
 import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.utils.ms
+import org.jitsi.utils.observableWhenChanged
 import org.jitsi.utils.secs
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.util.TreeMap
 
 /**
  * Extract the TCC sequence numbers from each passing packet and generate
@@ -55,18 +57,22 @@ class TccGeneratorNode(
     private var currTccSeqNum: Int = 0
     private var lastTccSentTime: Instant = NEVER
     private val lock = Any()
+
     // Tcc seq num -> arrival time in ms
-    private val packetArrivalTimes = TreeMap<Int, Long>()
+    private val packetArrivalTimes = TreeMap<Int, Instant>()
+
     // The first sequence number of the current tcc feedback packet
     private var windowStartSeq: Int = -1
     private val tccFeedbackBitrate = BitrateTracker(1.secs, 10.ms)
     private var numTccSent: Int = 0
     private var numMultipleTccPackets = 0
     private var enabled: Boolean by observableWhenChanged(false) {
-        _, _, newValue ->
+            _, _, newValue ->
         logger.debug("Setting enabled=$newValue")
     }
     private val rfc3711IndexTracker = Rfc3711IndexTracker()
+
+    private val lossListeners = mutableListOf<LossListener>()
 
     init {
         streamInformation.onRtpExtensionMapping(TRANSPORT_CC) {
@@ -90,9 +96,30 @@ class TccGeneratorNode(
     }
 
     /**
+     * Adds a loss listener to be notified about packet arrival and loss reports.
+     * @param listener
+     */
+    fun addLossListener(listener: LossListener) {
+        synchronized(lock) {
+            lossListeners.add(listener)
+        }
+    }
+
+    /**
+     * Removes a loss listener.
+     * @param listener
+     */
+    @Synchronized
+    fun removeLossListener(listener: LossListener) {
+        synchronized(lock) {
+            lossListeners.remove(listener)
+        }
+    }
+
+    /**
      * @param tccSeqNum the extended sequence number.
      */
-    private fun addPacket(tccSeqNum: Int, timestamp: Long, isMarked: Boolean, ssrc: Long) {
+    private fun addPacket(tccSeqNum: Int, timestamp: Instant?, isMarked: Boolean, ssrc: Long) {
         synchronized(lock) {
             if (packetArrivalTimes.ceilingKey(windowStartSeq) == null) {
                 // Packets in map are all older than the start of the next tcc feedback packet,
@@ -100,11 +127,43 @@ class TccGeneratorNode(
                 // TODO: Chrome does something more advanced, keeping older sequences to replay on packet reordering.
                 packetArrivalTimes.clear()
             }
-            if (windowStartSeq == -1 || tccSeqNum < windowStartSeq) {
-                windowStartSeq = tccSeqNum
-            }
 
-            packetArrivalTimes.putIfAbsent(tccSeqNum, timestamp)
+            timestamp?.run {
+                if (packetArrivalTimes.isEmpty() && windowStartSeq == -1) {
+                    lossListeners.forEach {
+                        it.packetReceived(false)
+                    }
+                } else {
+                    val oldMax = if (packetArrivalTimes.isNotEmpty()) {
+                        packetArrivalTimes.lastKey()
+                    } else {
+                        windowStartSeq - 1
+                    }
+                    if (tccSeqNum > oldMax) {
+                        val numLost = tccSeqNum - oldMax - 1
+                        /* TODO: should we squelch for large tcc jumps? */
+                        lossListeners.forEach {
+                            if (numLost > 0) {
+                                it.packetLost(numLost)
+                            }
+                            it.packetReceived(false)
+                        }
+                    } else if (tccSeqNum < windowStartSeq || !packetArrivalTimes.containsKey(tccSeqNum)) {
+                        /* If we've already cleared the arrival info about this packet, assume it was previously
+                         * reported as lost - there are some corner cases where this isn't true, but they should be rare.
+                         */
+                        lossListeners.forEach {
+                            it.packetReceived(true)
+                        }
+                    }
+                }
+
+                if (windowStartSeq == -1 || tccSeqNum < windowStartSeq) {
+                    windowStartSeq = tccSeqNum
+                }
+
+                packetArrivalTimes.putIfAbsent(tccSeqNum, timestamp)
+            }
             if (isTccReadyToSend(isMarked)) {
                 buildFeedback(ssrc).forEach { sendTcc(it) }
             }
@@ -123,12 +182,12 @@ class TccGeneratorNode(
                 mediaSourceSsrc = mediaSsrc,
                 feedbackPacketSeqNum = currTccSeqNum++
             )
-            currentTccPacket.SetBase(windowStartSeq, firstEntry.value * 1000)
+            currentTccPacket.SetBase(windowStartSeq, firstEntry.value.toEpochMicro())
 
             var nextSequenceNumber = windowStartSeq
             val feedbackBlockPackets = packetArrivalTimes.tailMap(windowStartSeq)
-            feedbackBlockPackets.forEach { (seq, timestampMs) ->
-                val timestampUs = timestampMs * 1000
+            feedbackBlockPackets.forEach { (seq, timestamp) ->
+                val timestampUs = timestamp.toEpochMicro()
                 if (!currentTccPacket.AddReceivedPacket(seq, timestampUs)) {
                     tccPackets.add(currentTccPacket.build())
                     currentTccPacket = RtcpFbTccPacketBuilder(

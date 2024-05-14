@@ -17,9 +17,9 @@
 package org.jitsi.nlj.transform.node.outgoing
 
 import io.kotest.core.spec.IsolationMode
-import io.kotest.matchers.shouldBe
 import io.kotest.core.spec.style.ShouldSpec
 import io.kotest.core.test.TestCase
+import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.instanceOf
 import org.jitsi.nlj.PacketInfo
 import org.jitsi.nlj.format.RtxPayloadType
@@ -38,6 +38,7 @@ class RetransmissionSenderTest : ShouldSpec() {
     private val originalSsrc = 1234L
     private val rtxSsrc = 5678L
     private val streamInformationStore = StreamInformationStoreImpl()
+
     // NOTE(brian): unfortunately i ran into issues trying to use mock frameworks to mock
     // a packet, notably i ran into issues when trying to mock the byte[] property in
     // the parent java class, mocking frameworks seem to struggle with this
@@ -54,7 +55,7 @@ class RetransmissionSenderTest : ShouldSpec() {
     private val dummyPacketInfo = PacketInfo(dummyPacket)
     private val retransmissionSender = RetransmissionSender(streamInformationStore, StdoutLogger())
 
-    override fun beforeTest(testCase: TestCase) {
+    override suspend fun beforeTest(testCase: TestCase) {
         super.beforeTest(testCase)
 
         // Setup: add the rtx payload type and the rtx ssrc association

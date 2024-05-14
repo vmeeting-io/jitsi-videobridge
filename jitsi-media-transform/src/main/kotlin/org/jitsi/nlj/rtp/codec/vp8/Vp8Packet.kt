@@ -19,9 +19,9 @@ package org.jitsi.nlj.rtp.codec.vp8
 import org.jitsi.nlj.RtpLayerDesc
 import org.jitsi.nlj.codec.vp8.Vp8Utils
 import org.jitsi.nlj.rtp.ParsedVideoPacket
-import org.jitsi.utils.logging2.cwarn
 import org.jitsi.rtp.extensions.bytearray.hashCodeOfSegment
 import org.jitsi.utils.logging2.createLogger
+import org.jitsi.utils.logging2.cwarn
 import org.jitsi_modified.impl.neomedia.codec.video.vp8.DePacketizer
 
 /**
@@ -32,17 +32,17 @@ import org.jitsi_modified.impl.neomedia.codec.video.vp8.DePacketizer
  * they're already known.  If they're null, this instance
  * will do the parsing itself.
  */
-class Vp8Packet private constructor (
+class Vp8Packet private constructor(
     buffer: ByteArray,
     offset: Int,
     length: Int,
     isKeyframe: Boolean?,
     isStartOfFrame: Boolean?,
-    encodingIndex: Int?,
+    encodingId: Int,
     height: Int?,
     pictureId: Int?,
     TL0PICIDX: Int?
-) : ParsedVideoPacket(buffer, offset, length, encodingIndex) {
+) : ParsedVideoPacket(buffer, offset, length, encodingId) {
 
     constructor(
         buffer: ByteArray,
@@ -52,7 +52,7 @@ class Vp8Packet private constructor (
         buffer, offset, length,
         isKeyframe = null,
         isStartOfFrame = null,
-        encodingIndex = null,
+        encodingId = RtpLayerDesc.SUSPENDED_ENCODING_ID,
         height = null,
         pictureId = null,
         TL0PICIDX = null
@@ -79,6 +79,7 @@ class Vp8Packet private constructor (
 
     val hasTL0PICIDX = DePacketizer.VP8PayloadDescriptor.hasTL0PICIDX(buffer, payloadOffset, payloadLength)
 
+    @field:Suppress("ktlint:standard:property-naming")
     private var _TL0PICIDX = TL0PICIDX
         ?: DePacketizer.VP8PayloadDescriptor.getTL0PICIDX(buffer, payloadOffset, payloadLength)
 
@@ -87,7 +88,10 @@ class Vp8Packet private constructor (
         set(newValue) {
             _TL0PICIDX = newValue
             if (newValue != -1 && !DePacketizer.VP8PayloadDescriptor.setTL0PICIDX(
-                    buffer, payloadOffset, payloadLength, newValue
+                    buffer,
+                    payloadOffset,
+                    payloadLength,
+                    newValue
                 )
             ) {
                 logger.cwarn { "Failed to set the TL0PICIDX of a VP8 packet." }
@@ -100,7 +104,10 @@ class Vp8Packet private constructor (
         set(newValue) {
             _pictureId = newValue
             if (!DePacketizer.VP8PayloadDescriptor.setExtendedPictureId(
-                    buffer, payloadOffset, payloadLength, newValue
+                    buffer,
+                    payloadOffset,
+                    payloadLength,
+                    newValue
                 )
             ) {
                 logger.cwarn { "Failed to set the picture id of a VP8 packet." }
@@ -109,8 +116,12 @@ class Vp8Packet private constructor (
 
     val temporalLayerIndex: Int = Vp8Utils.getTemporalLayerIdOfFrame(this)
 
-    override val layerId: Int
-        get() = if (hasTemporalLayerIndex) RtpLayerDesc.getIndex(0, 0, temporalLayerIndex) else super.layerId
+    override val layerIds: Collection<Int>
+        get() = if (hasTemporalLayerIndex) {
+            listOf(RtpLayerDesc.getIndex(0, 0, temporalLayerIndex))
+        } else {
+            super.layerIds
+        }
 
     /**
      * This is currently used as an overall spatial index, not an in-band spatial quality index a la vp9.  That is,
@@ -147,7 +158,7 @@ class Vp8Packet private constructor (
             length,
             isKeyframe = isKeyframe,
             isStartOfFrame = isStartOfFrame,
-            encodingIndex = qualityIndex,
+            encodingId = encodingId,
             height = height,
             pictureId = pictureId,
             TL0PICIDX = TL0PICIDX

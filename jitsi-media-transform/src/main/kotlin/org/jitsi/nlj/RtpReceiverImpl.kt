@@ -18,18 +18,17 @@ package org.jitsi.nlj
 import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
 import org.jitsi.metaconfig.from
-import org.jitsi.nlj.format.VideoRedPayloadType
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.ScheduledExecutorService
 import org.jitsi.nlj.rtcp.CompoundRtcpParser
 import org.jitsi.nlj.rtcp.RembHandler
 import org.jitsi.nlj.rtcp.RtcpEventNotifier
 import org.jitsi.nlj.rtcp.RtcpRrGenerator
 import org.jitsi.nlj.rtp.AudioRtpPacket
+import org.jitsi.nlj.rtp.LossListener
 import org.jitsi.nlj.rtp.VideoRtpPacket
 import org.jitsi.nlj.rtp.bandwidthestimation.BandwidthEstimator
 import org.jitsi.nlj.srtp.SrtpTransformers
 import org.jitsi.nlj.stats.NodeStatsBlock
+import org.jitsi.nlj.stats.RtpReceiverStats
 import org.jitsi.nlj.transform.NodeEventVisitor
 import org.jitsi.nlj.transform.NodeStatsVisitor
 import org.jitsi.nlj.transform.NodeTeardownVisitor
@@ -42,42 +41,39 @@ import org.jitsi.nlj.transform.node.RtpParser
 import org.jitsi.nlj.transform.node.SrtcpDecryptNode
 import org.jitsi.nlj.transform.node.SrtpDecryptNode
 import org.jitsi.nlj.transform.node.ToggleablePcapWriter
-import org.jitsi.nlj.transform.node.VideoPcapWriter
 import org.jitsi.nlj.transform.node.incoming.AudioLevelReader
 import org.jitsi.nlj.transform.node.incoming.BitrateCalculator
+import org.jitsi.nlj.transform.node.incoming.DiscardableDiscarder
 import org.jitsi.nlj.transform.node.incoming.DuplicateTermination
 import org.jitsi.nlj.transform.node.incoming.IncomingStatisticsTracker
-import org.jitsi.nlj.transform.node.incoming.VideoQualityLayerLookup
 import org.jitsi.nlj.transform.node.incoming.PaddingTermination
 import org.jitsi.nlj.transform.node.incoming.RemoteBandwidthEstimator
 import org.jitsi.nlj.transform.node.incoming.RetransmissionRequesterNode
 import org.jitsi.nlj.transform.node.incoming.RtcpTermination
 import org.jitsi.nlj.transform.node.incoming.RtxHandler
-import org.jitsi.nlj.transform.node.incoming.DiscardableDiscarder
 import org.jitsi.nlj.transform.node.incoming.TccGeneratorNode
 import org.jitsi.nlj.transform.node.incoming.VideoBitrateCalculator
-import org.jitsi.nlj.transform.node.incoming.VideoParser
 import org.jitsi.nlj.transform.node.incoming.VideoMuteNode
+import org.jitsi.nlj.transform.node.incoming.VideoParser
+import org.jitsi.nlj.transform.node.incoming.VideoQualityLayerLookup
 import org.jitsi.nlj.transform.packetPath
 import org.jitsi.nlj.transform.pipeline
+import org.jitsi.nlj.util.Bandwidth
+import org.jitsi.nlj.util.BufferPool
 import org.jitsi.nlj.util.PacketInfoQueue
 import org.jitsi.nlj.util.PacketPredicate
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
-import org.jitsi.utils.logging2.cdebug
-import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.rtp.Packet
 import org.jitsi.rtp.extensions.looksLikeRtcp
 import org.jitsi.rtp.extensions.looksLikeRtp
 import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
+import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.utils.queue.CountingErrorHandler
-
-import org.jitsi.nlj.util.Bandwidth
-import org.jitsi.nlj.util.BufferPool
-import java.time.Instant
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.ScheduledExecutorService
 
 class RtpReceiverImpl @JvmOverloads constructor(
     val id: String,
@@ -106,7 +102,6 @@ class RtpReceiverImpl @JvmOverloads constructor(
     private val logger = createChildLogger(parentLogger)
     private var running: Boolean = true
     private val inputTreeRoot: Node
-    private val queueSize: Int by config("jmt.transceiver.recv.queue-size".from(JitsiConfig.newConfig))
     private val incomingPacketQueue = PacketInfoQueue(
         "rtp-receiver-incoming-packet-queue",
         executor,
@@ -119,9 +114,8 @@ class RtpReceiverImpl @JvmOverloads constructor(
     private val remoteBandwidthEstimator = RemoteBandwidthEstimator(streamInformationStore, logger, diagnosticContext)
     private val audioLevelReader = AudioLevelReader(streamInformationStore).apply {
         audioLevelListener = object : AudioLevelListener {
-            override fun onLevelReceived(sourceSsrc: Long, level: Long) {
+            override fun onLevelReceived(sourceSsrc: Long, level: Long): Boolean =
                 eventHandler.audioLevelReceived(sourceSsrc, level)
-            }
         }
     }
 
@@ -149,18 +143,21 @@ class RtpReceiverImpl @JvmOverloads constructor(
     private val videoBitrateCalculator = VideoBitrateCalculator(parentLogger)
     private val audioBitrateCalculator = BitrateCalculator("Audio bitrate calculator")
 
-    private val videoPcapEnabled: Boolean by config("jmt.video2pcap.enabled".from(JitsiConfig.newConfig))
-    private val videoPcapDir: String by config("jmt.video2pcap.directory".from(JitsiConfig.newConfig))
-    private val videoPcapWriter = if (videoPcapEnabled) VideoPcapWriter(logger, id, videoPcapDir, diagnosticContext) else null
+    private val videoParser = VideoParser(streamInformationStore, logger, diagnosticContext)
 
     override fun isReceivingAudio() = audioBitrateCalculator.active
     override fun isReceivingVideo() = videoBitrateCalculator.active
+    override fun addLossListener(lossListener: LossListener) {
+        tccGenerator.addLossListener(lossListener)
+    }
 
     companion object {
         val queueErrorCounter = CountingErrorHandler()
 
         private const val PACKET_QUEUE_ENTRY_EVENT = "Entered RTP receiver incoming queue"
         private const val PACKET_QUEUE_EXIT_EVENT = "Exited RTP receiver incoming queue"
+
+        private val queueSize: Int by config("jmt.transceiver.recv.queue-size".from(JitsiConfig.newConfig))
 
         /**
          * Configuration for the packet loss to introduce in the receive pipeline (for debugging/testing purposes).
@@ -213,8 +210,6 @@ class RtpReceiverImpl @JvmOverloads constructor(
                     path = pipeline {
                         node(PacketLossNode(packetLossConfig), condition = { packetLossConfig.enabled })
                         node(RtpParser(streamInformationStore, logger))
-                        node(tccGenerator)
-                        node(remoteBandwidthEstimator)
                         // TODO: temporarily putting the audioLevelReader node here such that we can determine whether
                         // or not a packet should be discarded before doing SRTP. audioLevelReader has been moved here
                         // (instead of introducing a different class to read audio levels) to avoid parsing the RTP
@@ -222,9 +217,13 @@ class RtpReceiverImpl @JvmOverloads constructor(
                         // header extensions to make this lookup more efficient, at which time we could move
                         // audioLevelReader back to where it was (in the audio path) and add a new node here which would
                         // check for different discard conditions (i.e. checking the audio level for silence)
-                        node(audioLevelReader)
+                        node(audioLevelReader.preDecryptNode)
                         node(videoMuteNode)
                         node(srtpDecryptWrapper)
+                        node(tccGenerator)
+                        node(remoteBandwidthEstimator)
+                        // This reads audio levels from packets that use cryptex. TODO: should it go in the Audio path?
+                        node(audioLevelReader.postDecryptNode)
                         node(toggleablePcapWriter.newObserverNode())
                         node(statsTracker)
                         node(PaddingTermination(logger))
@@ -246,8 +245,7 @@ class RtpReceiverImpl @JvmOverloads constructor(
                                     node(DuplicateTermination())
                                     node(retransmissionRequester)
                                     node(paddingOnlyDiscarder)
-                                    node(VideoParser(streamInformationStore, logger))
-                                    videoPcapWriter?.let{node(it)}
+                                    node(videoParser)
                                     node(VideoQualityLayerLookup(logger))
                                     node(videoBitrateCalculator)
                                     node(packetHandlerWrapper)
@@ -309,9 +307,11 @@ class RtpReceiverImpl @JvmOverloads constructor(
         NodeEventVisitor(event).visit(inputTreeRoot)
     }
 
-    override fun getStreamStats() = statsTracker.getSnapshot()
-
-    override fun getPacketStreamStats() = packetStreamStats.snapshot()
+    override fun getStats(): RtpReceiverStats = RtpReceiverStats(
+        incomingStats = statsTracker.getSnapshot(),
+        packetStreamStats = packetStreamStats.snapshot(),
+        videoParserStats = videoParser.getStats()
+    )
 
     override fun forceMuteAudio(shouldMute: Boolean) {
         audioLevelReader.forceMute = shouldMute
@@ -350,7 +350,6 @@ class RtpReceiverImpl @JvmOverloads constructor(
         NodeTeardownVisitor().visit(inputTreeRoot)
         incomingPacketQueue.close()
         toggleablePcapWriter.disable()
-        videoPcapWriter?.close()
     }
 
     override fun onRttUpdate(newRttMs: Double) {

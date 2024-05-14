@@ -27,8 +27,6 @@ import org.jitsi.nlj.transform.node.ObserverNode
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore
 import org.jitsi.nlj.util.bps
 import org.jitsi.nlj.util.bytes
-import org.jitsi.utils.logging2.createChildLogger
-import org.jitsi.utils.observableWhenChanged
 import org.jitsi.rtp.rtcp.RtcpHeaderBuilder
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbRembPacket
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbRembPacketBuilder
@@ -38,9 +36,11 @@ import org.jitsi.utils.LRUCache
 import org.jitsi.utils.MediaType
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.createChildLogger
+import org.jitsi.utils.observableWhenChanged
 import java.time.Clock
 import java.time.Duration
-import java.time.Instant
+import java.util.Collections
 
 /**
  * Estimates the available bandwidth for the incoming stream using the abs-send-time extension.
@@ -52,20 +52,29 @@ class RemoteBandwidthEstimator(
     private val clock: Clock = Clock.systemUTC()
 ) : ObserverNode("Remote Bandwidth Estimator") {
     private val logger = createChildLogger(parentLogger)
+
     /**
      * The remote bandwidth estimation is enabled when REMB support is signaled, but TCC is not signaled.
      */
     private var enabled: Boolean by observableWhenChanged(false) {
-        _, _, newValue ->
+            _, _, newValue ->
         logger.debug { "Setting enabled=$newValue." }
     }
     private var astExtId: Int? = null
+
     /**
      * We use the full [GoogleCcEstimator] here, but we don't notify it of packet loss, effectively using only the
      * delay-based part.
      */
     private val bwe: BandwidthEstimator by lazy { GoogleCcEstimator(diagnosticContext, logger) }
-    private val ssrcs: MutableSet<Long> = LRUCache.lruSet(MAX_SSRCS, true /* accessOrder */)
+    private val ssrcs: MutableSet<Long> =
+        Collections.synchronizedSet(
+            LRUCache.lruSet(
+                MAX_SSRCS,
+                // accessOrder
+                true
+            )
+        )
     private var numRembsCreated = 0
     private var numPacketsWithoutAbsSendTime = 0
     private var localSsrc = 0L
@@ -103,9 +112,9 @@ class RemoteBandwidthEstimator(
                 bwe.processPacketArrival(
                     now,
                     AbsSendTimeHeaderExtension.getTime(ext),
-                    Instant.ofEpochMilli(packetInfo.receivedTime),
+                    packetInfo.receivedTime,
                     rtpPacket.sequenceNumber,
-                    rtpPacket.length.bytes
+                    packetInfo.originalLength.bytes
                 )
                 /* With receiver-side bwe we need to treat each received packet as separate feedback */
                 bwe.feedbackComplete(now)

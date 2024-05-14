@@ -15,14 +15,6 @@
  */
 package org.jitsi.nlj.dtls
 
-import java.math.BigInteger
-import java.security.KeyPair
-import java.security.KeyPairGenerator
-import java.security.SecureRandom
-import java.security.Security
-import java.time.Duration
-import java.util.Date
-import java.util.NoSuchElementException
 import org.bouncycastle.asn1.ASN1Encoding
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x500.X500NameBuilder
@@ -44,8 +36,16 @@ import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.cdebug
 import org.jitsi.utils.logging2.cerror
 import org.jitsi.utils.logging2.cinfo
+import java.math.BigInteger
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.SecureRandom
+import java.security.Security
+import java.time.Duration
+import java.util.Date
+import java.util.NoSuchElementException
 
-val SECURE_RANDOM = SecureRandom()
+private val SECURE_RANDOM = SecureRandom()
 val BC_TLS_CRYPTO = BcTlsCrypto(SECURE_RANDOM)
 
 /**
@@ -58,6 +58,8 @@ class DtlsUtils {
         init {
             Security.addProvider(BouncyCastleProvider())
         }
+
+        val config = DtlsConfig()
 
         fun generateCertificateInfo(): CertificateInfo {
             val cn = generateCN("TODO-APP-NAME", "TODO-APP-VERSION")
@@ -98,10 +100,7 @@ class DtlsUtils {
          *
          * TODO: make the algorithm dynamic (passed in) to support older dtls versions/clients
          */
-        private fun generateCertificate(
-            subject: X500Name,
-            keyPair: KeyPair
-        ): Certificate {
+        private fun generateCertificate(subject: X500Name, keyPair: KeyPair): Certificate {
             val now = System.currentTimeMillis()
             val startDate = Date(now - Duration.ofDays(1).toMillis())
             val expiryDate = Date(now + Duration.ofDays(7).toMillis())
@@ -161,7 +160,6 @@ class DtlsUtils {
             certificateInfo: org.bouncycastle.tls.Certificate,
             remoteFingerprints: Map<String, String>
         ) {
-
             if (certificateInfo.certificateList.isEmpty()) {
                 throw DtlsException("No remote fingerprints.")
             }
@@ -181,10 +179,7 @@ class DtlsUtils {
          * and validate against the fingerprints presented by the remote endpoint
          * via the signaling path.
          */
-        private fun verifyAndValidateCertificate(
-            certificate: Certificate,
-            remoteFingerprints: Map<String, String>
-        ) {
+        private fun verifyAndValidateCertificate(certificate: Certificate, remoteFingerprints: Map<String, String>) {
             // RFC 4572 "Connection-Oriented Media Transport over the Transport
             // Layer Security (TLS) Protocol in the Session Description Protocol
             // (SDP)" defines that "[a] certificate fingerprint MUST be computed
@@ -222,7 +217,7 @@ class DtlsUtils {
                         hashFunction = hashFunctionUpgrade
                 }
             }
-            */
+             */
 
             val certificateFingerprint = certificate.getFingerprint(hashFunction)
 
@@ -263,6 +258,7 @@ class DtlsUtils {
         }
 
         private val HEX_CHARS = "0123456789ABCDEF".toCharArray()
+
         /**
          * Helper function to convert a [ByteArray] to a colon-delimited hex string
          */
@@ -323,7 +319,7 @@ class DtlsUtils {
                 throw IllegalStateException("error in calculation of seed for export")
             }
 
-            return TlsUtils.PRF(context, masterSecret, asciiLabel, seed, length).extract()
+            return TlsUtils.PRF(sp, masterSecret, asciiLabel, seed, length).extract()
         }
     }
 

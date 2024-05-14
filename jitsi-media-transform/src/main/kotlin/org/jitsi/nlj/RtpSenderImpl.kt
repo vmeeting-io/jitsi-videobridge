@@ -18,13 +18,11 @@ package org.jitsi.nlj
 import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
 import org.jitsi.metaconfig.from
-import java.time.Duration
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.ScheduledExecutorService
 import org.jitsi.nlj.rtcp.KeyframeRequester
 import org.jitsi.nlj.rtcp.NackHandler
 import org.jitsi.nlj.rtcp.RtcpEventNotifier
 import org.jitsi.nlj.rtcp.RtcpSrUpdater
+import org.jitsi.nlj.rtp.LossListener
 import org.jitsi.nlj.rtp.TransportCcEngine
 import org.jitsi.nlj.rtp.bandwidthestimation.BandwidthEstimator
 import org.jitsi.nlj.rtp.bandwidthestimation.GoogleCcEstimator
@@ -45,24 +43,26 @@ import org.jitsi.nlj.transform.node.SrtpEncryptNode
 import org.jitsi.nlj.transform.node.ToggleablePcapWriter
 import org.jitsi.nlj.transform.node.outgoing.AbsSendTime
 import org.jitsi.nlj.transform.node.outgoing.HeaderExtEncoder
+import org.jitsi.nlj.transform.node.outgoing.HeaderExtStripper
 import org.jitsi.nlj.transform.node.outgoing.OutgoingStatisticsTracker
 import org.jitsi.nlj.transform.node.outgoing.ProbingDataSender
 import org.jitsi.nlj.transform.node.outgoing.RetransmissionSender
 import org.jitsi.nlj.transform.node.outgoing.SentRtcpStats
-import org.jitsi.nlj.transform.node.outgoing.HeaderExtStripper
 import org.jitsi.nlj.transform.node.outgoing.TccSeqNumTagger
 import org.jitsi.nlj.transform.pipeline
+import org.jitsi.nlj.util.BufferPool
 import org.jitsi.nlj.util.PacketInfoQueue
 import org.jitsi.nlj.util.StreamInformationStore
-import org.jitsi.utils.logging2.cdebug
-import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.utils.MediaType
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
+import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.utils.queue.CountingErrorHandler
-
-import org.jitsi.nlj.util.BufferPool
+import java.time.Duration
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.ScheduledExecutorService
 
 class RtpSenderImpl(
     val id: String,
@@ -86,7 +86,6 @@ class RtpSenderImpl(
     private val outgoingRtpRoot: Node
     private val outgoingRtxRoot: Node
     private val outgoingRtcpRoot: Node
-    private val queueSize: Int by config("jmt.transceiver.send.queue-size".from(JitsiConfig.newConfig))
     private val incomingPacketQueue = PacketInfoQueue(
         "rtp-sender-incoming-packet-queue",
         executor,
@@ -96,6 +95,7 @@ class RtpSenderImpl(
     var running = true
     private var localVideoSsrc: Long? = null
     private var localAudioSsrc: Long? = null
+
     // TODO(brian): this is changed to a handler instead of a queue because we want to use
     // a PacketQueue, and the handler for a PacketQueue must be set at the time of creation.
     // since we want the handler to be another entity (something in jvb) we just use
@@ -140,13 +140,13 @@ class RtpSenderImpl(
         incomingPacketQueue.setErrorHandler(queueErrorCounter)
 
         outgoingRtpRoot = pipeline {
-            node(AudioRedHandler(streamInformationStore))
+            node(AudioRedHandler(streamInformationStore, logger))
             node(HeaderExtStripper(streamInformationStore))
             node(outgoingPacketCache)
             node(absSendTime)
             node(statsTracker)
             node(TccSeqNumTagger(transportCcEngine, streamInformationStore))
-            node(HeaderExtEncoder())
+            node(HeaderExtEncoder(streamInformationStore, logger))
             node(toggleablePcapWriter.newObserverNode())
             node(srtpEncryptWrapper)
             node(packetStreamStats.createNewNode())
@@ -236,6 +236,10 @@ class RtpSenderImpl(
         keyframeRequester.requestKeyframe(mediaSsrc)
     }
 
+    override fun addLossListener(lossListener: LossListener) {
+        transportCcEngine.addLossListener(lossListener)
+    }
+
     override fun setFeature(feature: Features, enabled: Boolean) {
         when (feature) {
             Features.TRANSCEIVER_PCAP_DUMP -> {
@@ -295,6 +299,7 @@ class RtpSenderImpl(
     }
 
     override fun getNodeStats(): NodeStatsBlock = NodeStatsBlock("RTP sender $id").apply {
+        addBlock(super.getNodeStats())
         addBlock(nackHandler.getNodeStats())
         addBlock(probingDataSender.getNodeStats())
         addJson("packetQueue", incomingPacketQueue.debugState)
@@ -323,6 +328,8 @@ class RtpSenderImpl(
 
         private const val PACKET_QUEUE_ENTRY_EVENT = "Entered RTP sender incoming queue"
         private const val PACKET_QUEUE_EXIT_EVENT = "Exited RTP sender incoming queue"
+
+        private val queueSize: Int by config("jmt.transceiver.send.queue-size".from(JitsiConfig.newConfig))
 
         /**
          * Configuration for the packet loss to introduce in the send pipeline (for debugging/testing purposes).

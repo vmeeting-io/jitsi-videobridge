@@ -16,42 +16,46 @@
 
 package org.jitsi.nlj.stats
 
-import kotlin.math.abs
 import org.jitsi.nlj.PacketInfo
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import kotlin.math.abs
 
 open class JitterStats {
     var jitter: Double = 0.0
         private set
+
     /**
      * The timestamp of the previously received packet, converted to a millisecond timestamp based on the received
      * RTP timestamp and the clock rate for that stream.
      * 'previously received packet' here is as defined by the order in which the packets were received by this code,
      * which may be different than the order according to sequence number.
      */
-    private var previousPacketReceivedTimestampMs: Long = -1
-    private var previousPacketSentTimestampMs: Long = -1
+    private var previousPacketReceivedTimestamp: Instant? = null
+    private var previousPacketSentTimestamp: Instant? = null
 
-    fun addPacket(currentPacketSentTimestampMs: Long, currentPacketReceivedTimestampMs: Long) {
-        if (previousPacketReceivedTimestampMs != -1L) {
+    fun addPacket(currentPacketSentTimestamp: Instant, currentPacketReceivedTimestamp: Instant) {
+        if (previousPacketReceivedTimestamp != null) {
             jitter = calculateJitter(
                 jitter,
-                previousPacketSentTimestampMs,
-                previousPacketReceivedTimestampMs,
-                currentPacketSentTimestampMs,
-                currentPacketReceivedTimestampMs
+                previousPacketSentTimestamp!!,
+                previousPacketReceivedTimestamp!!,
+                currentPacketSentTimestamp,
+                currentPacketReceivedTimestamp
             )
         }
-        previousPacketSentTimestampMs = currentPacketSentTimestampMs
-        previousPacketReceivedTimestampMs = currentPacketReceivedTimestampMs
+        previousPacketSentTimestamp = currentPacketSentTimestamp
+        previousPacketReceivedTimestamp = currentPacketReceivedTimestamp
     }
 
     companion object {
         fun calculateJitter(
             currentJitter: Double,
-            previousPacketSentTimestamp: Long,
-            previousPacketReceivedTimestamp: Long,
-            currentPacketSentTimestamp: Long,
-            currentPacketReceivedTimestamp: Long
+            previousPacketSentTimestamp: Instant,
+            previousPacketReceivedTimestamp: Instant,
+            currentPacketSentTimestamp: Instant,
+            currentPacketReceivedTimestamp: Instant
         ): Double {
             /**
              * If Si is the RTP timestamp from packet i, and Ri is the time of
@@ -61,8 +65,8 @@ open class JitterStats {
              * D(i,j) = (Rj - Ri) - (Sj - Si) = (Rj - Sj) - (Ri - Si)
              */
             // TODO(boris) take wraps into account
-            val delta = (previousPacketReceivedTimestamp - previousPacketSentTimestamp) -
-                (currentPacketReceivedTimestamp - currentPacketSentTimestamp)
+            val delta = Duration.between(previousPacketSentTimestamp, previousPacketReceivedTimestamp) -
+                Duration.between(currentPacketSentTimestamp, currentPacketReceivedTimestamp)
 
             /**
              * The interarrival jitter SHOULD be calculated continuously as each
@@ -75,7 +79,7 @@ open class JitterStats {
              * Whenever a reception report is issued, the current value of J is
              * sampled.
              */
-            return currentJitter + (abs(delta) - currentJitter) / 16.0
+            return currentJitter + (abs(delta.toMillis()) - currentJitter) / 16.0
         }
     }
 }
@@ -83,11 +87,11 @@ open class JitterStats {
 /**
  * Tracks the jitter of packets *within* the bridge (not over the network)
  */
-class BridgeJitterStats : JitterStats() {
+class BridgeJitterStats(
+    private val clock: Clock = Clock.systemUTC()
+) : JitterStats() {
 
     fun packetSent(packetInfo: PacketInfo) {
-        if (packetInfo.receivedTime >= 0) {
-            super.addPacket(packetInfo.receivedTime, System.currentTimeMillis())
-        }
+        packetInfo.receivedTime?.let { super.addPacket(it, clock.instant()) }
     }
 }

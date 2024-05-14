@@ -15,9 +15,6 @@
  */
 package org.jitsi.nlj.rtp
 
-import java.time.Clock
-import java.time.Duration
-import java.time.Instant
 import org.jitsi.nlj.rtcp.RtcpListener
 import org.jitsi.nlj.rtp.bandwidthestimation.BandwidthEstimator
 import org.jitsi.nlj.util.ArrayCache
@@ -25,6 +22,7 @@ import org.jitsi.nlj.util.DataSize
 import org.jitsi.nlj.util.NEVER
 import org.jitsi.nlj.util.Rfc3711IndexTracker
 import org.jitsi.nlj.util.formatMilli
+import org.jitsi.nlj.util.instantOfEpochMicro
 import org.jitsi.rtp.rtcp.RtcpPacket
 import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.tcc.PacketReport
 import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.tcc.ReceivedPacketReport
@@ -34,6 +32,9 @@ import org.jitsi.utils.joinToRangedString
 import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.createChildLogger
 import org.json.simple.JSONObject
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.atomic.LongAdder
 
 /**
@@ -88,6 +89,8 @@ class TransportCcEngine(
 
     private var lastRtt: Duration? = null
 
+    private val lossListeners = mutableListOf<LossListener>()
+
     /**
      * Called when an RTP sender has a new round-trip time estimate.
      */
@@ -97,15 +100,33 @@ class TransportCcEngine(
         lastRtt = rtt
     }
 
-    override fun rtcpPacketReceived(rtcpPacket: RtcpPacket, receivedTime: Long) {
+    override fun rtcpPacketReceived(rtcpPacket: RtcpPacket, receivedTime: Instant?) {
         if (rtcpPacket is RtcpFbTccPacket) {
             tccReceived(rtcpPacket)
         }
     }
 
+    /**
+     * Adds a loss listener to be notified about packet arrival and loss reports.
+     * @param listener
+     */
+    @Synchronized
+    fun addLossListener(listener: LossListener) {
+        lossListeners.add(listener)
+    }
+
+    /**
+     * Removes a loss listener.
+     * @param listener
+     */
+    @Synchronized
+    fun removeLossListener(listener: LossListener) {
+        lossListeners.remove(listener)
+    }
+
     private fun tccReceived(tccPacket: RtcpFbTccPacket) {
         val now = clock.instant()
-        var currArrivalTimestamp = Instant.ofEpochMilli((tccPacket.GetBaseTimeUs() + 500) / 1000)
+        var currArrivalTimestamp = instantOfEpochMicro(tccPacket.GetBaseTimeUs())
         if (remoteReferenceTime == NEVER) {
             remoteReferenceTime = currArrivalTimestamp
             localReferenceTime = now
@@ -126,19 +147,24 @@ class TransportCcEngine(
 
             when (packetReport) {
                 is UnreceivedPacketReport -> {
-                    if (packetDetail.state == PacketDetailState.unreported) {
+                    if (packetDetail.state == PacketDetailState.Unreported) {
                         bandwidthEstimator.processPacketLoss(now, packetDetail.packetSendTime, tccSeqNum)
-                        packetDetail.state = PacketDetailState.reportedLost
+                        packetDetail.state = PacketDetailState.ReportedLost
                         numPacketsReported.increment()
                         numPacketsReportedLost.increment()
+                        synchronized(this) {
+                            lossListeners.forEach {
+                                it.packetLost(1)
+                            }
+                        }
                     }
                 }
                 is ReceivedPacketReport -> {
                     currArrivalTimestamp += packetReport.deltaDuration
 
                     when (packetDetail.state) {
-                        PacketDetailState.unreported, PacketDetailState.reportedLost -> {
-                            val previouslyReportedLost = packetDetail.state == PacketDetailState.reportedLost
+                        PacketDetailState.Unreported, PacketDetailState.ReportedLost -> {
+                            val previouslyReportedLost = packetDetail.state == PacketDetailState.ReportedLost
                             if (previouslyReportedLost) {
                                 numPacketsReportedAfterLost.increment()
                                 numPacketsReportedLost.decrement()
@@ -151,14 +177,22 @@ class TransportCcEngine(
                                 currArrivalTimestamp - Duration.between(localReferenceTime, remoteReferenceTime)
 
                             bandwidthEstimator.processPacketArrival(
-                                now, packetDetail.packetSendTime, arrivalTimeInLocalClock,
-                                tccSeqNum, packetDetail.packetLength,
+                                now,
+                                packetDetail.packetSendTime,
+                                arrivalTimeInLocalClock,
+                                tccSeqNum,
+                                packetDetail.packetLength,
                                 previouslyReportedLost = previouslyReportedLost
                             )
-                            packetDetail.state = PacketDetailState.reportedReceived
+                            synchronized(this) {
+                                lossListeners.forEach {
+                                    it.packetReceived(previouslyReportedLost)
+                                }
+                            }
+                            packetDetail.state = PacketDetailState.ReportedReceived
                         }
 
-                        PacketDetailState.reportedReceived ->
+                        PacketDetailState.ReportedReceived ->
                             numDuplicateReports.increment()
                     }
                 }
@@ -222,7 +256,9 @@ class TransportCcEngine(
      * [PacketDetailState] is the state of a [PacketDetail]
      */
     private enum class PacketDetailState {
-        unreported, reportedLost, reportedReceived
+        Unreported,
+        ReportedLost,
+        ReportedReceived
     }
 
     /**
@@ -241,7 +277,7 @@ class TransportCcEngine(
          * as [unreported]: once we receive a TCC feedback from the remote side referring
          * to this packet, the state will transition to either [reportedLost] or [reportedReceived].
          */
-        var state = PacketDetailState.unreported
+        var state = PacketDetailState.Unreported
     }
 
     data class StatisticsSnapshot(
@@ -271,8 +307,9 @@ class TransportCcEngine(
         clock = clock
     ) {
         override fun discardItem(item: PacketDetail) {
-            if (item.state == PacketDetailState.unreported)
+            if (item.state == PacketDetailState.Unreported) {
                 numPacketsUnreported.increment()
+            }
         }
 
         private val rfc3711IndexTracker = Rfc3711IndexTracker()

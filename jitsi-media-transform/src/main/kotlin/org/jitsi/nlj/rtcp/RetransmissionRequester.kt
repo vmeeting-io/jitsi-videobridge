@@ -16,6 +16,16 @@
 
 package org.jitsi.nlj.rtcp
 
+import org.jitsi.rtp.rtcp.RtcpPacket
+import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.RtcpFbNackPacketBuilder
+import org.jitsi.rtp.util.RtpUtils
+import org.jitsi.rtp.util.isNextAfter
+import org.jitsi.rtp.util.isOlderThan
+import org.jitsi.rtp.util.numPacketsTo
+import org.jitsi.utils.logging2.Logger
+import org.jitsi.utils.logging2.cdebug
+import org.jitsi.utils.logging2.createChildLogger
+import org.jitsi.utils.logging2.cwarn
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -24,16 +34,6 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import org.jitsi.utils.logging2.cdebug
-import org.jitsi.utils.logging2.createChildLogger
-import org.jitsi.utils.logging2.cwarn
-import org.jitsi.rtp.rtcp.RtcpPacket
-import org.jitsi.rtp.rtcp.rtcpfb.transport_layer_fb.RtcpFbNackPacketBuilder
-import org.jitsi.rtp.util.RtpUtils
-import org.jitsi.rtp.util.isNextAfter
-import org.jitsi.rtp.util.isOlderThan
-import org.jitsi.rtp.util.numPacketsTo
-import org.jitsi.utils.logging2.Logger
 
 class RetransmissionRequester(
     private val rtcpSender: (RtcpPacket) -> Unit,
@@ -89,6 +89,10 @@ class RetransmissionRequester(
             }
             synchronized(requests) {
                 when {
+                    seqNum == highestReceivedSeqNum -> {
+                        logger.cdebug { "$ssrc packet $seqNum was received, currently missing ${getMissingSeqNums()}" }
+                        // By definition we've already received highestReceivedSeqNum, so nothing needs to be done.
+                    }
                     seqNum isOlderThan highestReceivedSeqNum -> {
                         logger.cdebug { "$ssrc packet $seqNum was received, currently missing ${getMissingSeqNums()}" }
                         // An older packet, possibly already requested
@@ -169,6 +173,9 @@ class RetransmissionRequester(
             logger.cdebug { "$ssrc doing work at ${clock.instant()}" }
             val now = clock.instant()
             val missingSeqNums = getMissingSeqNums()
+            if (missingSeqNums.size >= maxMissingSeqNums) {
+                logger.warn { "$ssrc sending NACK for ${missingSeqNums.size} missing packets" }
+            }
             val nackPacket = RtcpFbNackPacketBuilder(
                 mediaSourceSsrc = ssrc,
                 missingSeqNums = missingSeqNums

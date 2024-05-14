@@ -19,6 +19,7 @@ package org.jitsi.nlj.rtp.codec.vp9
 import org.jitsi.nlj.RtpEncodingDesc
 import org.jitsi.nlj.RtpLayerDesc
 import org.jitsi.nlj.rtp.ParsedVideoPacket
+import org.jitsi.nlj.rtp.codec.vpx.VpxRtpLayerDesc
 import org.jitsi.rtp.extensions.bytearray.hashCodeOfSegment
 import org.jitsi.utils.logging2.createLogger
 import org.jitsi.utils.logging2.cwarn
@@ -32,17 +33,17 @@ import org.jitsi_modified.impl.neomedia.codec.video.vp9.DePacketizer
  * they're already known.  If they're null, this instance
  * will do the parsing itself.
  */
-class Vp9Packet private constructor (
+class Vp9Packet private constructor(
     buffer: ByteArray,
     offset: Int,
     length: Int,
     isKeyframe: Boolean?,
     isStartOfFrame: Boolean?,
     isEndOfFrame: Boolean?,
-    encodingIndex: Int?,
+    encodingId: Int,
     pictureId: Int?,
     TL0PICIDX: Int?
-) : ParsedVideoPacket(buffer, offset, length, encodingIndex) {
+) : ParsedVideoPacket(buffer, offset, length, encodingId) {
 
     constructor(
         buffer: ByteArray,
@@ -53,7 +54,7 @@ class Vp9Packet private constructor (
         isKeyframe = null,
         isStartOfFrame = null,
         isEndOfFrame = null,
-        encodingIndex = null,
+        encodingId = RtpLayerDesc.SUSPENDED_ENCODING_ID,
         pictureId = null,
         TL0PICIDX = null
     )
@@ -67,8 +68,12 @@ class Vp9Packet private constructor (
     override val isEndOfFrame: Boolean =
         isEndOfFrame ?: DePacketizer.VP9PayloadDescriptor.isEndOfFrame(buffer, payloadOffset, payloadLength)
 
-    override val layerId: Int
-        get() = if (hasLayerIndices) RtpLayerDesc.getIndex(0, spatialLayerIndex, temporalLayerIndex) else super.layerId
+    override val layerIds: Collection<Int>
+        get() = if (hasLayerIndices) {
+            listOf(RtpLayerDesc.getIndex(0, spatialLayerIndex, temporalLayerIndex))
+        } else {
+            super.layerIds
+        }
 
     /** End of VP9 picture is the marker bit. Note frame/picture distinction. */
     /* TODO: not sure this should be the override from [ParsedVideoPacket] */
@@ -94,6 +99,7 @@ class Vp9Packet private constructor (
     val isInterPicturePredicted =
         DePacketizer.VP9PayloadDescriptor.isInterPicturePredicted(buffer, payloadOffset, payloadLength)
 
+    @field:Suppress("ktlint:standard:property-naming")
     private var _TL0PICIDX =
         TL0PICIDX ?: DePacketizer.VP9PayloadDescriptor.getTL0PICIDX(buffer, payloadOffset, payloadLength)
 
@@ -101,7 +107,10 @@ class Vp9Packet private constructor (
         get() = _TL0PICIDX
         set(newValue) {
             if (newValue != -1 && !DePacketizer.VP9PayloadDescriptor.setTL0PICIDX(
-                    buffer, payloadOffset, payloadLength, newValue
+                    buffer,
+                    payloadOffset,
+                    payloadLength,
+                    newValue
                 )
             ) {
                 logger.cwarn { "Failed to set the TL0PICIDX of a VP9 packet." }
@@ -119,7 +128,10 @@ class Vp9Packet private constructor (
         get() = _pictureId
         set(newValue) {
             if (!DePacketizer.VP9PayloadDescriptor.setExtendedPictureId(
-                    buffer, payloadOffset, payloadLength, newValue
+                    buffer,
+                    payloadOffset,
+                    payloadLength,
+                    newValue
                 )
             ) {
                 logger.cwarn { "Failed to set the picture id of a VP9 packet." }
@@ -147,10 +159,8 @@ class Vp9Packet private constructor (
     val usesInterLayerDependency: Boolean =
         DePacketizer.VP9PayloadDescriptor.usesInterLayerDependency(buffer, payloadOffset, payloadLength)
 
-    fun getScalabilityStructure(
-        eid: Int = 0,
-        baseFrameRate: Double = 30.0
-    ) = Companion.getScalabilityStructure(buffer, payloadOffset, payloadLength, ssrc, eid, baseFrameRate)
+    fun getScalabilityStructure(eid: Int = 0, baseFrameRate: Double = 30.0) =
+        Companion.getScalabilityStructure(buffer, payloadOffset, payloadLength, ssrc, eid, baseFrameRate)
 
     val scalabilityStructureNumSpatial: Int
         get() {
@@ -189,7 +199,7 @@ class Vp9Packet private constructor (
             isKeyframe = isKeyframe,
             isStartOfFrame = isStartOfFrame,
             isEndOfFrame = isEndOfFrame,
-            encodingIndex = qualityIndex,
+            encodingId = encodingId,
             pictureId = pictureId,
             TL0PICIDX = TL0PICIDX
         )
@@ -237,7 +247,9 @@ class Vp9Packet private constructor (
              */
 
             var off = DePacketizer.VP9PayloadDescriptor.getScalabilityStructureOffset(
-                buffer, payloadOffset, payloadLength
+                buffer,
+                payloadOffset,
+                payloadLength
             )
             if (off == -1) {
                 return null
@@ -294,12 +306,12 @@ class Vp9Packet private constructor (
                 tlCounts[t] += tlCounts[t - 1]
             }
 
-            val layers = ArrayList<RtpLayerDesc>()
+            val layers = ArrayList<VpxRtpLayerDesc>()
 
             for (s in 0 until numSpatial) {
                 for (t in 0 until numTemporal) {
-                    val dependencies = ArrayList<RtpLayerDesc>()
-                    val softDependencies = ArrayList<RtpLayerDesc>()
+                    val dependencies = ArrayList<VpxRtpLayerDesc>()
+                    val softDependencies = ArrayList<VpxRtpLayerDesc>()
                     if (s > 0) {
                         /* Because of K-SVC, spatial layer dependencies are soft */
                         layers.find { it.sid == s - 1 && it.tid == t }?.let { softDependencies.add(it) }
@@ -307,7 +319,7 @@ class Vp9Packet private constructor (
                     if (t > 0) {
                         layers.find { it.sid == s && it.tid == t - 1 }?.let { dependencies.add(it) }
                     }
-                    val layerDesc = RtpLayerDesc(
+                    val layerDesc = VpxRtpLayerDesc(
                         eid = eid,
                         tid = t,
                         sid = s,
@@ -317,8 +329,8 @@ class Vp9Packet private constructor (
                         } else {
                             RtpLayerDesc.NO_FRAME_RATE
                         },
-                        dependencyLayers = dependencies.toArray(arrayOf<RtpLayerDesc>()),
-                        softDependencyLayers = softDependencies.toArray(arrayOf<RtpLayerDesc>())
+                        dependencyLayers = dependencies.toArray(arrayOf<VpxRtpLayerDesc>()),
+                        softDependencyLayers = softDependencies.toArray(arrayOf<VpxRtpLayerDesc>())
                     )
                     layers.add(layerDesc)
                 }
