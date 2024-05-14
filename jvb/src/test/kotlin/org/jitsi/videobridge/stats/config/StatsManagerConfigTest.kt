@@ -20,6 +20,8 @@ import io.kotest.inspectors.forOne
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
 import org.jitsi.ConfigTest
+import org.jitsi.config.withLegacyConfig
+import org.jitsi.config.withNewConfig
 import java.time.Duration
 
 internal class StatsManagerConfigTest : ConfigTest() {
@@ -29,15 +31,9 @@ internal class StatsManagerConfigTest : ConfigTest() {
             context("a stats transport config") {
                 context("with multiple, valid stats transports configured") {
                     withNewConfig(newConfigAllStatsTransports()) {
-                        val cfg = StatsManagerConfig()
-
-                        cfg.transportConfigs shouldHaveSize 2
-                        cfg.transportConfigs.forOne {
+                        StatsManagerConfig.config.transportConfigs shouldHaveSize 1
+                        StatsManagerConfig.config.transportConfigs.forOne {
                             it as StatsTransportConfig.MucStatsTransportConfig
-                            it.interval shouldBe Duration.ofSeconds(5)
-                        }
-                        cfg.transportConfigs.forOne {
-                            it as StatsTransportConfig.CallStatsIoStatsTransportConfig
                             it.interval shouldBe Duration.ofSeconds(5)
                         }
                     }
@@ -45,18 +41,17 @@ internal class StatsManagerConfigTest : ConfigTest() {
                 context("with an invalid stats transport configured") {
                     withNewConfig(newConfigInvalidStatsTransports()) {
                         should("ignore the invalid config and parse the valid transport correctly") {
-                            val cfg = StatsManagerConfig()
-
-                            cfg.transportConfigs shouldHaveSize 1
-                            cfg.transportConfigs.forOne { it as StatsTransportConfig.MucStatsTransportConfig }
+                            StatsManagerConfig.config.transportConfigs shouldHaveSize 1
+                            StatsManagerConfig.config.transportConfigs.forOne {
+                                it as StatsTransportConfig.MucStatsTransportConfig
+                            }
                         }
                     }
                 }
                 context("which has a custom interval") {
                     withNewConfig(newConfigOneStatsTransportCustomInterval()) {
                         should("reflect the custom interval") {
-                            val cfg = StatsManagerConfig()
-                            cfg.transportConfigs.forOne {
+                            StatsManagerConfig.config.transportConfigs.forOne {
                                 it as StatsTransportConfig.MucStatsTransportConfig
                                 it.interval shouldBe Duration.ofSeconds(10)
                             }
@@ -69,11 +64,10 @@ internal class StatsManagerConfigTest : ConfigTest() {
             withLegacyConfig(legacyConfigAllStatsTransports()) {
                 withNewConfig(newConfigOneStatsTransport()) {
                     should("use the values from the old config") {
-                        val cfg = StatsManagerConfig()
-
-                        cfg.transportConfigs shouldHaveSize 2
-                        cfg.transportConfigs.forOne { it as StatsTransportConfig.MucStatsTransportConfig }
-                        cfg.transportConfigs.forOne { it as StatsTransportConfig.CallStatsIoStatsTransportConfig }
+                        StatsManagerConfig.config.transportConfigs shouldHaveSize 1
+                        StatsManagerConfig.config.transportConfigs.forOne {
+                            it as StatsTransportConfig.MucStatsTransportConfig
+                        }
                     }
                 }
             }
@@ -89,10 +83,7 @@ private fun newConfigAllStatsTransports(enabled: Boolean = true) = """
             transports = [
                 {
                     type="muc"
-                },
-                {
-                    type="callstatsio"
-                },
+                }
             ]
         }
     }
@@ -144,9 +135,7 @@ private fun newConfigInvalidStatsTransports(enabled: Boolean = true) = """
     }
 """.trimIndent()
 
-private fun legacyConfigStatsEnabled(enabled: Boolean = true) = "org.jitsi.videobridge.ENABLE_STATISTICS=$enabled"
-
 private fun legacyConfigAllStatsTransports(enabled: Boolean = true) = """
     org.jitsi.videobridge.ENABLE_STATISTICS=$enabled
-    org.jitsi.videobridge.STATISTICS_TRANSPORT=muc,callstats.io
+    org.jitsi.videobridge.STATISTICS_TRANSPORT=muc
 """.trimIndent()

@@ -15,14 +15,19 @@
  */
 package org.jitsi.videobridge.websocket;
 
-import org.eclipse.jetty.websocket.api.extensions.*;
-import org.eclipse.jetty.websocket.servlet.*;
+import org.eclipse.jetty.server.*;
+import org.eclipse.jetty.websocket.api.*;
+import org.eclipse.jetty.websocket.server.*;
 import org.jetbrains.annotations.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.relay.*;
 import org.jitsi.videobridge.websocket.config.*;
 
+import static org.jitsi.videobridge.websocket.config.WebsocketServiceConfig.config;
+
 import java.io.*;
+import java.time.*;
 import java.util.*;
 import java.util.stream.*;
 
@@ -30,7 +35,7 @@ import java.util.stream.*;
  * @author Boris Grozev
  */
 class ColibriWebSocketServlet
-    extends WebSocketServlet
+    extends JettyWebSocketServlet
 {
     /**
      * The logger instance used by this {@link ColibriWebSocketServlet}.
@@ -45,8 +50,6 @@ class ColibriWebSocketServlet
 
     @NotNull
     private final Videobridge videobridge;
-
-    private WebsocketServiceConfig config = new WebsocketServiceConfig();
 
     /**
      * Initializes a new {@link ColibriWebSocketServlet} instance.
@@ -63,10 +66,10 @@ class ColibriWebSocketServlet
      * {@inheritDoc}
      */
     @Override
-    public void configure(WebSocketServletFactory webSocketServletFactory)
+    public void configure(JettyWebSocketServletFactory webSocketServletFactory)
     {
         // set a timeout of 1min
-        webSocketServletFactory.getPolicy().setIdleTimeout(60000);
+        webSocketServletFactory.setIdleTimeout(WebsocketServiceConfig.config.getIdleTimeout());
 
         webSocketServletFactory.setCreator((request, response) ->
         {
@@ -78,7 +81,7 @@ class ColibriWebSocketServlet
             }
             catch (IOException ioe)
             {
-                response.setSuccess(false);
+                response.setStatusCode(Response.SC_INTERNAL_SERVER_ERROR);
                 return null;
             }
         });
@@ -87,20 +90,36 @@ class ColibriWebSocketServlet
     /**
      * Handles a request for a web-socket. Validates the request URI and either
      * accepts the request and creates a {@link ColibriWebSocket} instance, or
-     * rejects rejects the request and sends an error.
+     * rejects the request and sends an error.
      */
     private ColibriWebSocket createWebSocket(
-            ServletUpgradeRequest request,
-            ServletUpgradeResponse response)
+            JettyServerUpgradeRequest request,
+            JettyServerUpgradeResponse response)
         throws IOException
     {
         // A valid request URI looks like this:
         // /colibri-ws/server-id/conf-id/endpoint-id?pwd=password
+        // or /colibri-ws/relay/server-id/conf-id/relay-id?pwd=password
         // The "path" does not include "?pwd=password", which is in the "query"
         String path = request.getRequestURI().getPath();
         logger.debug(() -> "Got a create websocket request at path " + path);
-        if (path == null
-            || !path.startsWith(ColibriWebSocketService.COLIBRI_WS_PATH))
+        boolean isRelay;
+
+        if (path == null)
+        {
+            logger.debug(() -> "Received request for an invalid path: " + path);
+            response.sendError(404, "invalid path");
+            return null;
+        }
+        else if (path.startsWith(ColibriWebSocketService.COLIBRI_WS_PATH))
+        {
+            isRelay = false;
+        }
+        else if (path.startsWith(ColibriWebSocketService.COLIBRI_RELAY_WS_PATH))
+        {
+            isRelay = true;
+        }
+        else
         {
             logger.debug(() -> "Received request for an invalid path: " + path);
             response.sendError(404, "invalid path");
@@ -108,7 +127,9 @@ class ColibriWebSocketServlet
         }
 
         String wsPath
-            = path.substring(ColibriWebSocketService.COLIBRI_WS_PATH.length());
+            = path.substring((isRelay ?
+            ColibriWebSocketService.COLIBRI_RELAY_WS_PATH :
+            ColibriWebSocketService.COLIBRI_WS_PATH).length());
         String[] ids = wsPath.split("/");
         if (ids.length < 3)
         {
@@ -138,21 +159,47 @@ class ColibriWebSocketServlet
             return null;
         }
 
-        AbstractEndpoint abstractEndpoint = conference.getEndpoint(ids[2]);
-        if (!(abstractEndpoint instanceof Endpoint))
-        {
-            logger.warn("Received request for a nonexistent endpoint: "
-                            + ids[2] + "(conference " + conference.getID() + ")");
-            response.sendError(403, authFailed);
-            return null;
-        }
+        ColibriWebSocket.EventHandler eventHandler;
 
-        Endpoint endpoint = (Endpoint) abstractEndpoint;
-        String pwd = getPwd(request.getRequestURI().getQuery());
-        if (!endpoint.acceptWebSocket(pwd))
+        if (isRelay)
         {
-            response.sendError(403, authFailed);
-            return null;
+            Relay relay = conference.getRelay(ids[2]);
+            if (relay == null)
+            {
+                logger.warn("Received request for a nonexistent relay: "
+                    + ids[2] + " (conference " + conference.getID() + ")");
+                response.sendError(403, authFailed);
+                return null;
+            }
+
+            String pwd = getPwd(request.getRequestURI().getQuery());
+            if (!relay.acceptWebSocket(pwd))
+            {
+                response.sendError(403, authFailed);
+                return null;
+            }
+
+            eventHandler = relay.getMessageTransport();
+        }
+        else
+        {
+            Endpoint endpoint = conference.getLocalEndpoint(ids[2]);
+            if (endpoint == null)
+            {
+                logger.warn("Received request for a nonexistent endpoint: "
+                    + ids[2] + " (conference " + conference.getID() + ")");
+                response.sendError(403, authFailed);
+                return null;
+            }
+
+            String pwd = getPwd(request.getRequestURI().getQuery());
+            if (!endpoint.acceptWebSocket(pwd))
+            {
+                response.sendError(403, authFailed);
+                return null;
+            }
+
+            eventHandler = endpoint.getMessageTransport();
         }
 
         if (!config.shouldEnableCompression())
@@ -163,7 +210,7 @@ class ColibriWebSocketServlet
             response.setExtensions(extensions);
         }
 
-        return new ColibriWebSocket(ids[2], this, endpoint.getMessageTransport());
+        return new ColibriWebSocket(ids[2], eventHandler);
     }
 
     /**

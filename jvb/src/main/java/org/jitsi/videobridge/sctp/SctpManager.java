@@ -34,7 +34,8 @@ import static org.jitsi.videobridge.sctp.SctpConfig.config;
  * will route it through the {@link SctpSocket} instance so that, if it is an SCTP app packet the user of the
  * {@link SctpSocket} will receive it via the data callback.
  */
-public class SctpManager {
+public class SctpManager
+{
     private static final Logger classLogger = new LoggerImpl(SctpManager.class.getName());
 
     private final Logger logger;
@@ -50,15 +51,18 @@ public class SctpManager {
      */
     private SctpSocket socket = null;
 
-
-    // We hard-code 5000 in the offer, so just mark it as the default here.
-    private static int DEFAULT_SCTP_PORT = 5000;
+    /**
+     * We always use symmetric ports with SCTP (local port = remote port).
+     */
+    public static int DEFAULT_SCTP_PORT = 5000;
     static
     {
         if (config.enabled())
         {
             classLogger.info("Initializing Sctp4j");
-            Sctp4j.init(DEFAULT_SCTP_PORT);
+            // "If UDP encapsulation is not necessary, the UDP port has to be set to 0"
+            // All our SCTP is encapsulated in DTLS, we don't use direct UDP encapsulation.
+            Sctp4j.init(0);
         }
         else
         {
@@ -86,7 +90,8 @@ public class SctpManager {
      * @param sctpPacket an incoming SCTP packet which may be either an SCTP protocol control packet or an SCTP
      *                   application packet
      */
-    public void handleIncomingSctp(PacketInfo sctpPacket) {
+    public void handleIncomingSctp(PacketInfo sctpPacket)
+    {
         logger.debug(() -> "SCTP Socket " + socket.hashCode() + " receiving incoming SCTP data");
         //NOTE(brian): from what I can tell in usrsctp, we can assume that it will make a copy
         // of the buffer we pass it here (this ends up hitting usrsctp_conninput, and the sample
@@ -104,9 +109,9 @@ public class SctpManager {
      * Create an {@link SctpServerSocket} to be used to wait for incoming SCTP connections
      * @return an {@link SctpServerSocket}
      */
-    public SctpServerSocket createServerSocket()
+    public SctpServerSocket createServerSocket(Logger parentLogger)
     {
-        socket = Sctp4j.createServerSocket(DEFAULT_SCTP_PORT);
+        socket = Sctp4j.createServerSocket(DEFAULT_SCTP_PORT, parentLogger);
         socket.outgoingDataSender = this.dataSender;
         logger.debug(() -> "Created SCTP server socket " + socket.hashCode());
         return (SctpServerSocket)socket;
@@ -116,8 +121,9 @@ public class SctpManager {
      * Create an {@link SctpClientSocket} to be used to open an SCTP connection
      * @return an {@link SctpClientSocket}
      */
-    public SctpClientSocket createClientSocket() {
-        socket = Sctp4j.createClientSocket(DEFAULT_SCTP_PORT);
+    public SctpClientSocket createClientSocket(Logger parentLogger)
+    {
+        socket = Sctp4j.createClientSocket(DEFAULT_SCTP_PORT, parentLogger);
         socket.outgoingDataSender = this.dataSender;
         if (logger.isDebugEnabled())
         {
@@ -154,7 +160,8 @@ public class SctpManager {
      * in order to change from a buffer that was allocated by jitsi-sctp
      * to one from our pool, this way it can be returned later in the pipeline.
      */
-    private static class BufferCopyingSctpDataSender implements SctpDataSender {
+    private static class BufferCopyingSctpDataSender implements SctpDataSender
+    {
         private final SctpDataSender innerSctpDataSender;
         BufferCopyingSctpDataSender(@NotNull SctpDataSender sctpDataSender)
         {

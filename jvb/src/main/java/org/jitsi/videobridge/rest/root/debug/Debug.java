@@ -24,6 +24,7 @@ import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.queue.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.relay.*;
 import org.jitsi.videobridge.rest.*;
 import org.jitsi.videobridge.rest.annotations.*;
 import org.jitsi.videobridge.stats.*;
@@ -31,10 +32,12 @@ import org.jitsi.videobridge.transport.ice.*;
 import org.jitsi.videobridge.util.*;
 import org.jitsi.videobridge.xmpp.*;
 
-import javax.inject.*;
-import javax.ws.rs.*;
-import javax.ws.rs.core.*;
-import javax.ws.rs.core.MediaType;
+import jakarta.inject.*;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.*;
+import jakarta.ws.rs.core.MediaType;
+import org.json.simple.JSONObject;
+
 import java.net.*;
 
 /**
@@ -129,6 +132,9 @@ public class Debug
                 // Always enabled (worth modeling as a 'feature' then?)
                 return true;
             }
+            case TOSSED_PACKET_STATS: {
+                return true;
+            }
             default: {
                 throw new NotFoundException();
             }
@@ -197,6 +203,68 @@ public class Debug
         }
     }
 
+    @POST
+    @Path("/features/relay/{confId}/{rId}/{feature}/{enabled}")
+    public Response setRelayFeatureState(
+        @PathParam("confId") String confId,
+        @PathParam("rId") String rId,
+        @PathParam("feature") EndpointDebugFeatures feature,
+        @PathParam("enabled") Boolean enabled)
+    {
+        Conference conference = videobridge.getConference(confId);
+        if (conference == null)
+        {
+            throw new NotFoundException("No conference was found with the specified id.");
+        }
+
+        Relay relay = conference.getRelay(rId);
+        if (relay == null)
+        {
+            throw new NotFoundException("No relay was found with the specified id.");
+        }
+
+        logger.info("Setting feature state: feature=" + feature.getValue() + ", enabled? " + enabled);
+        try
+        {
+            relay.setFeature(feature, enabled);
+        }
+        catch (IllegalStateException e)
+        {
+            return Response.status(403, e.getMessage()).build();
+        }
+
+        return Response.ok().build();
+    }
+
+    @GET
+    @Path("/features/relay/{confId}/{rId}/{feature}/")
+    public Boolean getRelayFeatureState(
+        @PathParam("confId") String confId,
+        @PathParam("rId") String rId,
+        @PathParam("feature") EndpointDebugFeatures feature)
+    {
+        Conference conference = videobridge.getConference(confId);
+        if (conference == null)
+        {
+            throw new NotFoundException("No conference was found with the specified id.");
+        }
+
+        Relay relay = conference.getRelay(rId);
+        if (relay == null)
+        {
+            throw new NotFoundException("No relay was found with the specified id.");
+        }
+
+        try
+        {
+            return relay.isFeatureEnabled(feature);
+        }
+        catch (Exception e)
+        {
+            throw new ServerErrorException(e.getMessage(), Response.Status.INTERNAL_SERVER_ERROR);
+        }
+    }
+
 
     private void setFeature(DebugFeatures feature, boolean enabled)
     {
@@ -253,8 +321,13 @@ public class Debug
         OrderedJsonObject debugState = videobridge.getDebugState(null, null, full);
 
         // Append the health status.
-        Exception result = healthCheckService.getResult();
-        debugState.put("health", result == null ? "OK" : result.getMessage());
+        Result result = healthCheckService.getResult();
+        JSONObject health = new JSONObject();
+        health.put("success", result.getSuccess());
+        health.put("hardFailure", result.getHardFailure());
+        health.put("responseCode", result.getResponseCode());
+        health.put("message", result.getMessage());
+        debugState.put("health", health);
 
         return debugState.toJSONString();
     }
@@ -312,6 +385,12 @@ public class Debug
             }
             case ICE_STATS: {
                 return IceStatistics.Companion.getStats().toJson().toJSONString();
+            }
+            case CONFERENCE_PACKET_STATS: {
+                return ConferencePacketStats.stats.toJson().toJSONString();
+            }
+            case TOSSED_PACKET_STATS: {
+                return videobridge.getStatistics().tossedPacketsEnergy.toJson().toJSONString();
             }
             default: {
                 throw new NotFoundException();

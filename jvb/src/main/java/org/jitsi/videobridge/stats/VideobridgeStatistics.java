@@ -16,15 +16,16 @@
 package org.jitsi.videobridge.stats;
 
 import org.jetbrains.annotations.*;
+import org.jitsi.metrics.*;
 import org.jitsi.nlj.rtcp.*;
 import org.jitsi.nlj.stats.*;
 import org.jitsi.nlj.transform.node.incoming.*;
-import org.jitsi.utils.*;
 import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.load_management.*;
-import org.jitsi.videobridge.octo.*;
-import org.jitsi.videobridge.octo.config.*;
-import org.jitsi.videobridge.shim.*;
+import org.jitsi.videobridge.metrics.*;
+import org.jitsi.videobridge.relay.*;
+import org.jitsi.videobridge.shutdown.*;
+import org.jitsi.videobridge.transport.ice.*;
 import org.jitsi.videobridge.xmpp.*;
 import org.json.simple.*;
 
@@ -58,8 +59,11 @@ public class VideobridgeStatistics
     /**
      * The currently configured region.
      */
-    private static final String region = OctoConfig.config.getRegion();
+    private static final InfoMetric regionInfo = RelayConfig.config.getRegion() != null ?
+            VideobridgeMetricsContainer.getInstance()
+                .registerInfo(REGION, "The currently configured region.", RelayConfig.config.getRegion()) : null;
 
+    private static final String relayId = RelayConfig.config.getEnabled() ? RelayConfig.config.getRelayId() : null;
 
     public static final String EPS_NO_MSG_TRANSPORT_AFTER_DELAY = "num_eps_no_msg_transport_after_delay";
     public static final String TOTAL_ICE_SUCCEEDED_RELAYED = "total_ice_succeeded_relayed";
@@ -116,20 +120,20 @@ public class VideobridgeStatistics
     private boolean inGenerate = false;
 
     private final @NotNull Videobridge videobridge;
-    private final @Nullable OctoRelayService octoRelayService;
     private final @NotNull XmppConnection xmppConnection;
+
+    private final BooleanMetric healthy = VideobridgeMetricsContainer.getInstance()
+            .registerBooleanMetric("healthy", "Whether the Videobridge instance is healthy or not.", true);
 
     /**
      * Creates instance of <tt>VideobridgeStatistics</tt>.
      */
     public VideobridgeStatistics(
-        @NotNull Videobridge videobridge,
-        @Nullable OctoRelayService octoRelayService,
-        @NotNull XmppConnection xmppConnection
+            @NotNull Videobridge videobridge,
+            @NotNull XmppConnection xmppConnection
     )
     {
         this.videobridge = videobridge;
-        this.octoRelayService = octoRelayService;
         this.xmppConnection = xmppConnection;
 
         timestampFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
@@ -146,8 +150,22 @@ public class VideobridgeStatistics
         unlockedSetStat(RTT_AGGREGATE, 0d);
         unlockedSetStat(LARGEST_CONFERENCE, 0);
         unlockedSetStat(CONFERENCE_SIZES, "[]");
-
         unlockedSetStat(TIMESTAMP, timestampFormat.format(new Date()));
+        unlockedSetStat("healthy",
+                healthy.setAndGet(videobridge.getJvbHealthChecker().getResult().getSuccess()));
+
+        // Set these once, they won't change.
+        unlockedSetStat(VERSION, videobridge.getVersion().toString());
+
+        String releaseId = videobridge.getReleaseId();
+        if (releaseId != null)
+        {
+            unlockedSetStat(RELEASE, releaseId);
+        }
+        if (regionInfo != null)
+        {
+            unlockedSetStat(REGION, regionInfo.get());
+        }
     }
 
     /**
@@ -211,7 +229,6 @@ public class VideobridgeStatistics
         Videobridge.Statistics jvbStats = videobridge.getStatistics();
 
         int videoChannels = 0;
-        int conferences = 0;
         int octoConferences = 0;
         int endpoints = 0;
         int localEndpoints = 0;
@@ -220,6 +237,10 @@ public class VideobridgeStatistics
         double bitrateUploadBps = 0;
         long packetRateUpload = 0;
         long packetRateDownload = 0;
+        double relayBitrateIncomingBps = 0;
+        double relayBitrateOutgoingBps = 0;
+        long relayPacketRateOutgoing = 0;
+        long relayPacketRateIncoming = 0;
 
         // Packets we received
         long incomingPacketsReceived = 0;
@@ -250,12 +271,12 @@ public class VideobridgeStatistics
         int numOversending = 0;
         int endpointsWithHighOutgoingLoss = 0;
         int numLocalActiveEndpoints = 0;
+        int endpointsWithSuspendedSources = 0;
 
         for (Conference conference : videobridge.getConferences())
         {
-            ConferenceShim conferenceShim = conference.getShim();
-            //TODO: can/should we do everything here via the shim only?
-            conferences++;
+            long conferenceBitrate = 0;
+            long conferencePacketRate = 0;
             if (conference.isP2p())
             {
                 p2pConferences++;
@@ -272,7 +293,7 @@ public class VideobridgeStatistics
                 numLocalActiveEndpoints += conference.getLocalEndpointCount();
             }
 
-            if (conference.isOctoEnabled())
+            if (conference.hasRelays())
             {
                 octoConferences++;
             }
@@ -291,15 +312,13 @@ public class VideobridgeStatistics
             int conferenceAudioSenders = 0;
             int conferenceVideoSenders = 0;
 
-            for (ContentShim contentShim : conferenceShim.getContents())
-            {
-                if (MediaType.VIDEO.equals(contentShim.getMediaType()))
-                {
-                    videoChannels += contentShim.getChannelCount();
-                }
-            }
             for (Endpoint endpoint : conference.getLocalEndpoints())
             {
+                if (endpoint.getAcceptVideo())
+                {
+                    videoChannels++;
+                }
+
                 if (endpoint.isOversending())
                 {
                     numOversending++;
@@ -318,11 +337,18 @@ public class VideobridgeStatistics
                 {
                     receiveOnlyEndpoints++;
                 }
+                if (endpoint.hasSuspendedSources())
+                {
+                    endpointsWithSuspendedSources++;
+                }
                 TransceiverStats transceiverStats = endpoint.getTransceiver().getTransceiverStats();
-                IncomingStatisticsSnapshot incomingStats = transceiverStats.getIncomingStats();
-                PacketStreamStats.Snapshot incomingPacketStreamStats = transceiverStats.getIncomingPacketStreamStats();
+                IncomingStatisticsSnapshot incomingStats = transceiverStats.getRtpReceiverStats().getIncomingStats();
+                PacketStreamStats.Snapshot incomingPacketStreamStats
+                        = transceiverStats.getRtpReceiverStats().getPacketStreamStats();
                 bitrateDownloadBps += incomingPacketStreamStats.getBitrateBps();
                 packetRateDownload += incomingPacketStreamStats.getPacketRate();
+                conferenceBitrate += incomingPacketStreamStats.getBitrateBps();
+                conferencePacketRate += incomingPacketStreamStats.getPacketRate();
                 for (IncomingSsrcStats.Snapshot ssrcStats : incomingStats.getSsrcStats().values())
                 {
                     double ssrcJitter = ssrcStats.getJitter();
@@ -338,6 +364,8 @@ public class VideobridgeStatistics
                 PacketStreamStats.Snapshot outgoingStats = transceiverStats.getOutgoingPacketStreamStats();
                 bitrateUploadBps += outgoingStats.getBitrateBps();
                 packetRateUpload += outgoingStats.getPacketRate();
+                conferenceBitrate += outgoingStats.getBitrateBps();
+                conferencePacketRate += outgoingStats.getPacketRate();
 
                 EndpointConnectionStats.Snapshot endpointConnectionStats
                         = transceiverStats.getEndpointConnectionStats();
@@ -368,10 +396,26 @@ public class VideobridgeStatistics
                 }
             }
 
+            for (Relay relay : conference.getRelays())
+            {
+                relayBitrateIncomingBps += relay.getIncomingBitrateBps();
+                relayPacketRateIncoming += relay.getIncomingPacketRate();
+                conferenceBitrate += relay.getIncomingBitrateBps();
+                conferencePacketRate += relay.getIncomingPacketRate();
+
+                relayBitrateOutgoingBps += relay.getOutgoingBitrateBps();
+                relayPacketRateOutgoing += relay.getOutgoingPacketRate();
+                conferenceBitrate += relay.getOutgoingBitrateBps();
+                conferencePacketRate += relay.getOutgoingPacketRate();
+
+                /* TODO: report Relay RTT and loss, like we do for Endpoints? */
+            }
+
             updateBuckets(audioSendersBuckets, conferenceAudioSenders);
             numAudioSenders += conferenceAudioSenders;
             updateBuckets(videoSendersBuckets, conferenceVideoSenders);
             numVideoSenders += conferenceVideoSenders;
+            ConferencePacketStats.stats.addValue(numConferenceEndpoints, conferencePacketRate, conferenceBitrate);
         }
 
         // JITTER_AGGREGATE
@@ -457,28 +501,28 @@ public class VideobridgeStatistics
             unlockedSetStat(RTT_AGGREGATE, rttAggregate);
             unlockedSetStat(
                     TOTAL_FAILED_CONFERENCES,
-                    jvbStats.totalFailedConferences.get());
+                    jvbStats.failedConferences.get());
             unlockedSetStat(
                     TOTAL_PARTIALLY_FAILED_CONFERENCES,
-                    jvbStats.totalPartiallyFailedConferences.get());
+                    jvbStats.partiallyFailedConferences.get());
             unlockedSetStat(
                     TOTAL_CONFERENCES_CREATED,
-                    jvbStats.totalConferencesCreated.get());
+                    jvbStats.conferencesCreated.get());
             unlockedSetStat(
                     TOTAL_CONFERENCES_COMPLETED,
-                    jvbStats.totalConferencesCompleted.get());
+                    jvbStats.conferencesCompleted.get());
             unlockedSetStat(
                     TOTAL_ICE_FAILED,
-                    jvbStats.totalIceFailed.get());
+                    IceTransport.Companion.getIceFailed().get());
             unlockedSetStat(
                     TOTAL_ICE_SUCCEEDED,
-                    jvbStats.totalIceSucceeded.get());
+                    IceTransport.Companion.getIceSucceeded().get());
             unlockedSetStat(
                     TOTAL_ICE_SUCCEEDED_TCP,
-                    jvbStats.totalIceSucceededTcp.get());
+                    IceTransport.Companion.getIceSucceededTcp().get());
             unlockedSetStat(
                     TOTAL_ICE_SUCCEEDED_RELAYED,
-                    jvbStats.totalIceSucceededRelayed.get());
+                    IceTransport.Companion.getIceSucceededRelayed().get());
             unlockedSetStat(
                     TOTAL_CONFERENCE_SECONDS,
                     jvbStats.totalConferenceSeconds.get());
@@ -493,10 +537,21 @@ public class VideobridgeStatistics
                     TOTAL_LOSS_DEGRADED_PARTICIPANT_SECONDS,
                    jvbStats.totalLossDegradedParticipantMs.get() / 1000);
             unlockedSetStat(TOTAL_PARTICIPANTS, jvbStats.totalEndpoints.get());
+            unlockedSetStat("total_visitors", jvbStats.totalVisitors.get());
             unlockedSetStat(
                 EPS_NO_MSG_TRANSPORT_AFTER_DELAY,
                 jvbStats.numEndpointsNoMessageTransportAfterDelay.get()
             );
+            unlockedSetStat("total_relays", jvbStats.totalRelays.get());
+            unlockedSetStat(
+                "num_relays_no_msg_transport_after_delay",
+                jvbStats.numRelaysNoMessageTransportAfterDelay.get()
+            );
+            unlockedSetStat("total_keyframes_received", jvbStats.keyframesReceived.get());
+            unlockedSetStat("total_layering_changes_received", jvbStats.layeringChangesReceived.get());
+            unlockedSetStat(
+                "total_video_stream_milliseconds_received",
+                jvbStats.totalVideoStreamMillisecondsReceived.get());
             unlockedSetStat(
                 "stress_level",
                 jvbStats.stressLevel
@@ -506,11 +561,12 @@ public class VideobridgeStatistics
                 JvbLoadManager.Companion.getAverageParticipantStress()
             );
             unlockedSetStat("num_eps_oversending", numOversending);
-            unlockedSetStat(CONFERENCES, conferences);
+            unlockedSetStat(CONFERENCES, jvbStats.currentConferences.get());
             unlockedSetStat(OCTO_CONFERENCES, octoConferences);
             unlockedSetStat(INACTIVE_CONFERENCES, inactiveConferences);
             unlockedSetStat(P2P_CONFERENCES, p2pConferences);
             unlockedSetStat("endpoints", endpoints);
+            unlockedSetStat("visitors", jvbStats.currentVisitors.get());
             unlockedSetStat(PARTICIPANTS, endpoints);
             unlockedSetStat("local_endpoints", localEndpoints);
             unlockedSetStat(RECEIVE_ONLY_ENDPOINTS, receiveOnlyEndpoints);
@@ -526,77 +582,46 @@ public class VideobridgeStatistics
             unlockedSetStat(THREADS, threadCount);
             unlockedSetStat(
                     SHUTDOWN_IN_PROGRESS,
-                    videobridge.isShutdownInProgress());
+                    videobridge.isInGracefulShutdown());
+            if (videobridge.getShutdownState() == ShutdownState.SHUTTING_DOWN)
+            {
+                unlockedSetStat("shutting_down", true);
+            }
+            unlockedSetStat(DRAIN, videobridge.getDrainMode());
             unlockedSetStat(TOTAL_DATA_CHANNEL_MESSAGES_RECEIVED,
-                            jvbStats.totalDataChannelMessagesReceived.get());
+                            jvbStats.dataChannelMessagesReceived.get());
             unlockedSetStat(TOTAL_DATA_CHANNEL_MESSAGES_SENT,
-                            jvbStats.totalDataChannelMessagesSent.get());
+                            jvbStats.dataChannelMessagesSent.get());
             unlockedSetStat(TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_RECEIVED,
-                            jvbStats.totalColibriWebSocketMessagesReceived.get());
+                            jvbStats.colibriWebSocketMessagesReceived.get());
             unlockedSetStat(TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_SENT,
-                            jvbStats.totalColibriWebSocketMessagesSent.get());
+                            jvbStats.colibriWebSocketMessagesSent.get());
             unlockedSetStat(
                     TOTAL_BYTES_RECEIVED, jvbStats.totalBytesReceived.get());
-            unlockedSetStat("dtls_failed_endpoints", jvbStats.dtlsFailedEndpoints.get());
+            unlockedSetStat("dtls_failed_endpoints", jvbStats.endpointsDtlsFailed.get());
             unlockedSetStat(TOTAL_BYTES_SENT, jvbStats.totalBytesSent.get());
             unlockedSetStat(
-                    TOTAL_PACKETS_RECEIVED, jvbStats.totalPacketsReceived.get());
-            unlockedSetStat(TOTAL_PACKETS_SENT, jvbStats.totalPacketsSent.get());
-            unlockedSetStat("tossedPacketsEnergy", jvbStats.tossedPacketsEnergy.toJson());
+                    TOTAL_PACKETS_RECEIVED, jvbStats.packetsReceived.get());
+            unlockedSetStat(TOTAL_PACKETS_SENT, jvbStats.packetsSent.get());
 
-            OctoRelayService.Stats octoRelayServiceStats
-                = octoRelayService == null ? null : octoRelayService.getStats();
+            unlockedSetStat("colibri2", true);
 
-            if (octoRelayService != null)
-            {
-                unlockedSetStat("octo_version", OctoRelayService.OCTO_VERSION);
-            }
-
-            unlockedSetStat(
-                    TOTAL_BYTES_RECEIVED_OCTO,
-                    octoRelayServiceStats == null ? 0 : octoRelayServiceStats.getBytesReceived());
-            unlockedSetStat(
-                    TOTAL_BYTES_SENT_OCTO,
-                    octoRelayServiceStats == null ? 0 : octoRelayServiceStats.getBytesSent());
-            unlockedSetStat(
-                    TOTAL_PACKETS_RECEIVED_OCTO,
-                    octoRelayServiceStats == null ? 0 : octoRelayServiceStats.getPacketsReceived());
-            unlockedSetStat(
-                    TOTAL_PACKETS_SENT_OCTO,
-                    octoRelayServiceStats == null ? 0 : octoRelayServiceStats.getPacketsSent());
-            unlockedSetStat(
-                    TOTAL_PACKETS_DROPPED_OCTO,
-                    octoRelayServiceStats == null ? 0 : octoRelayServiceStats.getPacketsDropped());
-            unlockedSetStat(
-                    OCTO_RECEIVE_BITRATE,
-                    octoRelayServiceStats == null
-                            ? 0 : octoRelayServiceStats.getReceiveBitrate());
-            unlockedSetStat(
-                    OCTO_RECEIVE_PACKET_RATE,
-                    octoRelayServiceStats == null
-                            ? 0 : octoRelayServiceStats.getReceivePacketRate());
-            unlockedSetStat(
-                    OCTO_SEND_BITRATE,
-                    octoRelayServiceStats == null
-                            ? 0 : octoRelayServiceStats.getSendBitrate());
-            unlockedSetStat(
-                    OCTO_SEND_PACKET_RATE,
-                    octoRelayServiceStats == null
-                            ? 0 : octoRelayServiceStats.getSendPacketRate());
-            unlockedSetStat(
-                    TOTAL_DOMINANT_SPEAKER_CHANGES,
-                    jvbStats.totalDominantSpeakerChanges.sum());
+            unlockedSetStat(TOTAL_BYTES_RECEIVED_OCTO, jvbStats.totalRelayBytesReceived.get());
+            unlockedSetStat(TOTAL_BYTES_SENT_OCTO, jvbStats.totalRelayBytesSent.get());
+            unlockedSetStat(TOTAL_PACKETS_RECEIVED_OCTO, jvbStats.relayPacketsReceived.get());
+            unlockedSetStat(TOTAL_PACKETS_SENT_OCTO, jvbStats.relayPacketsSent.get());
+            unlockedSetStat(OCTO_RECEIVE_BITRATE, relayBitrateIncomingBps);
+            unlockedSetStat(OCTO_RECEIVE_PACKET_RATE, relayPacketRateIncoming);
+            unlockedSetStat(OCTO_SEND_BITRATE, relayBitrateOutgoingBps);
+            unlockedSetStat(OCTO_SEND_PACKET_RATE, relayPacketRateOutgoing);
+            unlockedSetStat(TOTAL_DOMINANT_SPEAKER_CHANGES, jvbStats.dominantSpeakerChanges.get());
+            unlockedSetStat("endpoints_with_suspended_sources", endpointsWithSuspendedSources);
 
             unlockedSetStat(TIMESTAMP, timestampFormat.format(new Date()));
-            if (octoRelayServiceStats != null)
+            if (relayId != null)
             {
-                unlockedSetStat(RELAY_ID, octoRelayServiceStats.getRelayId());
+                unlockedSetStat(RELAY_ID, relayId);
             }
-            if (region != null)
-            {
-                unlockedSetStat(REGION, region);
-            }
-            unlockedSetStat(VERSION, videobridge.getVersion().toString());
 
             // TODO(brian): expose these stats in a `getStats` call in XmppConnection
             //  rather than calling xmppConnection.getMucClientManager?
@@ -615,6 +640,10 @@ public class VideobridgeStatistics
             unlockedSetStat("preemptive_kfr_sent", jvbStats.preemptiveKeyframeRequestsSent.get());
             unlockedSetStat("preemptive_kfr_suppressed", jvbStats.preemptiveKeyframeRequestsSuppressed.get());
             unlockedSetStat("endpoints_with_spurious_remb", RembHandler.Companion.endpointsWithSpuriousRemb());
+            unlockedSetStat("healthy",
+                    healthy.setAndGet(videobridge.getJvbHealthChecker().getResult().getSuccess()));
+            unlockedSetStat("endpoints_disconnected", EndpointConnectionStatusMonitor.endpointsDisconnected.get());
+            unlockedSetStat("endpoints_reconnected", EndpointConnectionStatusMonitor.endpointsReconnected.get());
         }
         finally
         {

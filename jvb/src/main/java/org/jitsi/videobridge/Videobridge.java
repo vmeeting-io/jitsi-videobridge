@@ -18,34 +18,42 @@ package org.jitsi.videobridge;
 import kotlin.*;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.*;
+import org.jitsi.health.Result;
+import org.jitsi.metrics.*;
 import org.jitsi.nlj.*;
 import org.jitsi.shutdown.*;
 import org.jitsi.utils.*;
-import org.jitsi.utils.event.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.utils.queue.*;
 import org.jitsi.utils.stats.*;
 import org.jitsi.utils.version.*;
+import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.load_management.*;
-import org.jitsi.videobridge.octo.*;
-import org.jitsi.videobridge.octo.config.*;
-import org.jitsi.videobridge.shim.*;
+import org.jitsi.videobridge.metrics.*;
+import org.jitsi.videobridge.relay.*;
+import org.jitsi.videobridge.shutdown.*;
+import org.jitsi.videobridge.stats.*;
 import org.jitsi.videobridge.util.*;
 import org.jitsi.videobridge.xmpp.*;
 import org.jitsi.xmpp.extensions.*;
 import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.colibri2.*;
 import org.jitsi.xmpp.extensions.health.*;
 import org.jitsi.xmpp.extensions.jingle.*;
-import org.jitsi.xmpp.util.*;
 import org.jivesoftware.smack.packet.*;
 import org.jivesoftware.smack.provider.*;
 import org.json.simple.*;
 import org.jxmpp.jid.*;
+import org.jxmpp.jid.impl.*;
+import org.jxmpp.stringprep.*;
 
+import java.time.*;
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.stream.*;
+
+import static org.jitsi.videobridge.colibri2.Colibri2UtilKt.*;
+import static org.jitsi.xmpp.util.ErrorUtilKt.createError;
 
 /**
  * Represents the Jitsi Videobridge which creates, lists and destroys
@@ -73,33 +81,28 @@ public class Videobridge
     public static final Random RANDOM = new Random();
 
     /**
-     * The REST-like HTTP/JSON API of Jitsi Videobridge.
-     */
-    public static final String REST_API = "rest";
-
-    /**
-     * The (base) <tt>System</tt> and/or <tt>ConfigurationService</tt> property
-     * of the REST-like HTTP/JSON API of Jitsi Videobridge.
+     * The <tt>Conference</tt>s of this <tt>Videobridge</tt> mapped by their local IDs.
      *
-     * NOTE: Previously, the rest API name ("org.jitsi.videobridge.rest")
-     * conflicted with other values in the new config, since we have
-     * other properties scoped *under* "org.jitsi.videobridge.rest".   The
-     * long term solution will be to port the command-line args to new config,
-     * but for now we rename the property used to signal the rest API is
-     * enabled so it doesn't conflict.
-     */
-    public static final String REST_API_PNAME = "org.jitsi.videobridge." + REST_API + "_api_temp";
-
-    /**
-     * The <tt>Conference</tt>s of this <tt>Videobridge</tt> mapped by their
-     * IDs.
+     * TODO: The only remaining uses of this ID are for the HTTP debug interface and the colibri WebSocket conference
+     * identifier. This should be replaced with meetingId (while making sure jvb-rtcstats-push doesn't break).
      */
     private final Map<String, Conference> conferencesById = new HashMap<>();
 
     /**
-     * Indicates if this bridge instance has entered graceful shutdown mode.
+     * The <tt>Conference</tt>s of this <tt>Videobridge</tt> mapped by their
+     * meeting IDs.
      */
-    private boolean shutdownInProgress;
+    private final Map<String, Conference> conferencesByMeetingId = new HashMap<>();
+
+    private final JvbHealthChecker jvbHealthChecker = new JvbHealthChecker();
+
+    /**
+     * The clock to use, pluggable for testing purposes.
+     *
+     * Note that currently most code uses the system clock directly.
+     */
+    @NotNull
+    private final Clock clock;
 
     /**
      * A class that holds some instance statistics.
@@ -115,19 +118,13 @@ public class Videobridge
     /**
      * The {@link JvbLoadManager} instance used for this bridge.
      */
-    private final JvbLoadManager<PacketRateMeasurement> jvbLoadManager;
+    @NotNull
+    private final JvbLoadManager<?> jvbLoadManager;
 
-    /**
-     * The task which manages the recurring load sampling and updating of
-     * {@link Videobridge#jvbLoadManager}.
-     */
-    private final ScheduledFuture<?> loadSamplerTask;
+    @NotNull private final Version version;
+    @Nullable private final String releaseId;
 
-    private final Version version;
-
-    @NotNull private final ShutdownServiceImpl shutdownService;
-
-    private final EventEmitter<EventHandler> eventEmitter = new SyncEventEmitter<>();
+    @NotNull private final ShutdownManager shutdownManager;
 
     static
     {
@@ -149,48 +146,37 @@ public class Videobridge
     public Videobridge(
         @Nullable XmppConnection xmppConnection,
         @NotNull ShutdownServiceImpl shutdownService,
-        @NotNull Version version)
+        @NotNull Version version,
+        @Nullable String releaseId,
+        @NotNull Clock clock)
     {
+        this.clock = clock;
         videobridgeExpireThread = new VideobridgeExpireThread(this);
-        jvbLoadManager = new JvbLoadManager<>(
-            PacketRateMeasurement.getLoadedThreshold(),
-            PacketRateMeasurement.getRecoveryThreshold(),
-            new LastNReducer(
-                this::getConferences,
-                JvbLastNKt.jvbLastNSingleton
-            )
-        );
-        loadSamplerTask = TaskPools.SCHEDULED_POOL.scheduleAtFixedRate(
-            new PacketRateLoadSampler(
-                this,
-                (loadMeasurement) -> {
-                    // Update the load manager with the latest measurement
-                    jvbLoadManager.loadUpdate(loadMeasurement);
-                    // Update the stats with the latest stress level
-                    getStatistics().stressLevel = jvbLoadManager.getCurrentStressLevel();
-                    return Unit.INSTANCE;
-                }
-            ),
-            0,
-            10,
-            TimeUnit.SECONDS
-        );
+        jvbLoadManager = JvbLoadManager.create(this);
         if (xmppConnection != null)
         {
             xmppConnection.setEventHandler(new XmppConnectionEventHandler());
         }
         this.version = version;
-        this.shutdownService = shutdownService;
+        this.releaseId = releaseId;
+        this.shutdownManager = new ShutdownManager(shutdownService, logger);
+        jvbHealthChecker.start();
+    }
+
+    @NotNull
+    public JvbHealthChecker getJvbHealthChecker()
+    {
+        return jvbHealthChecker;
     }
 
     /**
      * Generate conference IDs until one is found that isn't in use and create a new {@link Conference}
      * object using that ID
-     * @param name
-     * @param gid
-     * @return
      */
-    private @NotNull Conference doCreateConference(EntityBareJid name, long gid, String meetingId)
+    private @NotNull Conference doCreateConference(
+            @Nullable EntityBareJid name,
+            String meetingId,
+            boolean isRtcStatsEnabled)
     {
         Conference conference = null;
         do
@@ -199,10 +185,21 @@ public class Videobridge
 
             synchronized (conferencesById)
             {
+                if (meetingId != null && conferencesByMeetingId.containsKey(meetingId))
+                {
+                    throw new IllegalStateException("Already have a meeting with meetingId " + meetingId);
+                }
+
                 if (!conferencesById.containsKey(id))
                 {
-                    conference = new Conference(this, id, name, gid, meetingId);
+                    conference = new Conference(this, id, name, meetingId, isRtcStatsEnabled);
                     conferencesById.put(id, conference);
+                    statistics.currentConferences.inc();
+
+                    if (meetingId != null)
+                    {
+                        conferencesByMeetingId.put(meetingId, conference);
+                    }
                 }
             }
         }
@@ -211,18 +208,29 @@ public class Videobridge
         return conference;
     }
 
-    /**
-     * Initializes a new {@link Conference} instance with an ID unique to the
-     * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt> and
-     * adds the new instance to the list of existing <tt>Conference</tt>
-     * instances.
-     *
-     * @param name world readable name of the conference to create.
-     * the {@link Conference}.
-     */
-    public @NotNull Conference createConference(EntityBareJid name)
+    void localEndpointCreated(boolean visitor)
     {
-        return createConference(name, Conference.GID_NOT_SET, null);
+        statistics.currentLocalEndpoints.inc();
+        if (visitor)
+        {
+            statistics.currentVisitors.inc();
+        }
+    }
+
+    void localEndpointExpired(boolean visitor)
+    {
+        long remainingEndpoints = statistics.currentLocalEndpoints.decAndGet();
+        if (visitor)
+        {
+            statistics.currentVisitors.dec();
+        }
+
+        if (remainingEndpoints < 0)
+        {
+            logger.warn("Invalid endpoint count " + remainingEndpoints + ". Disabling endpoint-count based shutdown!");
+            return;
+        }
+        shutdownManager.maybeShutdown(remainingEndpoints);
     }
 
     /**
@@ -231,40 +239,22 @@ public class Videobridge
      * adds the new instance to the list of existing <tt>Conference</tt>
      * instances.
      *
+     * @param gid  the "global" id of the conference (or
+     *             {@link Conference#GID_NOT_SET} if it is not specified.
      * @param name world readable name of the conference to create.
-     * @param gid the "global" id of the conference (or
-     * {@link Conference#GID_NOT_SET} if it is not specified.
      * @return a new <tt>Conference</tt> instance with an ID unique to the
      * <tt>Conference</tt> instances listed by this <tt>Videobridge</tt>
      */
-    public @NotNull Conference createConference(EntityBareJid name, long gid, String meetingId)
+    private @NotNull Conference createConference(
+            @Nullable EntityBareJid name,
+            String meetingId,
+            boolean isRtcStatsEnabled)
     {
-        final Conference conference = doCreateConference(name, gid, meetingId);
+        final Conference conference = doCreateConference(name, meetingId, isRtcStatsEnabled);
 
-        logger.info(() -> "create_conf, id=" + conference.getID() + " gid=" + conference.getGid());
-
-        eventEmitter.fireEvent(handler ->
-        {
-            handler.conferenceCreated(conference);
-            return Unit.INSTANCE;
-        });
+        logger.info(() -> "create_conf, id=" + conference.getID() + " meeting_id=" + meetingId);
 
         return conference;
-    }
-
-    /**
-     * Enables graceful shutdown mode on this bridge instance and eventually
-     * starts the shutdown immediately if no conferences are currently being
-     * hosted. Otherwise bridge will shutdown once all conferences expire.
-     */
-    private void enableGracefulShutdownMode()
-    {
-        if (!shutdownInProgress)
-        {
-            logger.info("Entered graceful shutdown mode");
-        }
-        this.shutdownInProgress = true;
-        maybeDoShutdown();
     }
 
     /**
@@ -278,23 +268,25 @@ public class Videobridge
     public void expireConference(Conference conference)
     {
         String id = conference.getID();
+        String meetingId = conference.getMeetingId();
 
         synchronized (conferencesById)
         {
             if (conference.equals(conferencesById.get(id)))
             {
                 conferencesById.remove(id);
-                conference.expire();
-                eventEmitter.fireEvent(handler ->
+                statistics.currentConferences.dec();
+
+                if (meetingId != null)
                 {
-                    handler.conferenceExpired(conference);
-                    return Unit.INSTANCE;
-                });
+                    if (conference.equals(conferencesByMeetingId.get(meetingId)))
+                    {
+                        conferencesByMeetingId.remove(meetingId);
+                    }
+                }
+                conference.expire();
             }
         }
-
-        // Check if it's the time to shutdown now
-        maybeDoShutdown();
     }
 
     /**
@@ -333,6 +325,18 @@ public class Videobridge
     }
 
     /**
+     * Gets an existing {@link Conference} with a specific meeting ID.
+     */
+    public Conference getConferenceByMeetingId(@NotNull String meetingId)
+    {
+        /* Note that conferenceByMeetingId is synchronized on conferencesById. */
+        synchronized (conferencesById)
+        {
+            return conferencesByMeetingId.get(meetingId);
+        }
+    }
+
+    /**
      * Gets the <tt>Conference</tt>s of this <tt>Videobridge</tt>.
      *
      * @return the <tt>Conference</tt>s of this <tt>Videobridge</tt>
@@ -346,30 +350,38 @@ public class Videobridge
     }
 
     /**
-     * Handles a COLIBRI request synchronously.
-     * @param conferenceIq The COLIBRI request.
-     * @return The response in the form of an {@link IQ}. It is either an error or a {@link ColibriConferenceIQ}.
+     * Handles a COLIBRI2 request synchronously.
+     * @param conferenceModifyIQ The COLIBRI request.
+     * @return The response in the form of an {@link IQ}. It is either an error or a {@link ConferenceModifiedIQ}.
      */
-    public IQ handleColibriConferenceIQ(ColibriConferenceIQ conferenceIq)
+    public IQ handleConferenceModifyIq(ConferenceModifyIQ conferenceModifyIQ)
     {
         Conference conference;
         try
         {
-            conference = getOrCreateConference(conferenceIq);
+            conference = getOrCreateConference(conferenceModifyIQ);
         }
         catch (ConferenceNotFoundException e)
         {
-            return IQUtils.createError(
-                    conferenceIq,
-                    StanzaError.Condition.bad_request,
-                    "Conference not found for ID: " + conferenceIq.getID());
+            return createConferenceNotFoundError(conferenceModifyIQ, conferenceModifyIQ.getMeetingId());
+        }
+        catch (ConferenceAlreadyExistsException e)
+        {
+            return createConferenceAlreadyExistsError(conferenceModifyIQ, conferenceModifyIQ.getMeetingId());
         }
         catch (InGracefulShutdownException e)
         {
-            return ColibriConferenceIQ.createGracefulShutdownErrorResponse(conferenceIq);
+            return createGracefulShutdownErrorResponse(conferenceModifyIQ);
+        }
+        catch (XmppStringprepException e)
+        {
+            return createError(
+                    conferenceModifyIQ,
+                    StanzaError.Condition.bad_request,
+                    "Invalid conference name (not a JID)");
         }
 
-        return conference.getShim().handleColibriConferenceIQ(conferenceIq);
+        return conference.handleConferenceModifyIQ(conferenceModifyIQ);
     }
 
     /**
@@ -377,84 +389,79 @@ public class Videobridge
      */
     private void handleColibriRequest(XmppConnection.ColibriRequest request)
     {
-        ColibriConferenceIQ conferenceIq = request.getRequest();
+        ConferenceModifyIQ iq = request.getRequest();
+        String id = request.getRequest().getMeetingId();
         Conference conference;
+
         try
         {
-            conference = getOrCreateConference(conferenceIq);
+            conference = getOrCreateConference(request.getRequest());
         }
         catch (ConferenceNotFoundException e)
         {
-            request.getCallback().invoke(
-                    IQUtils.createError(
-                            conferenceIq,
-                            StanzaError.Condition.bad_request,
-                            "Conference not found for ID: " + conferenceIq.getID()));
+            request.getCallback().invoke(createConferenceNotFoundError(iq, id));
+            return;
+        }
+        catch (ConferenceAlreadyExistsException e)
+        {
+            request.getCallback().invoke(createConferenceAlreadyExistsError(iq, id));
             return;
         }
         catch (InGracefulShutdownException e)
         {
-            request.getCallback().invoke(ColibriConferenceIQ.createGracefulShutdownErrorResponse(conferenceIq));
+            request.getCallback().invoke(createGracefulShutdownErrorResponse(iq));
+            return;
+        }
+        catch (XmppStringprepException e)
+        {
+            request.getCallback().invoke(
+                createError(iq, StanzaError.Condition.bad_request, "Invalid conference name (not a JID)"));
             return;
         }
 
         // It is now the responsibility of Conference to send a response.
-        conference.getShim().enqueueColibriRequest(request);
+        conference.enqueueColibriRequest(request);
     }
 
-    private @NotNull Conference getOrCreateConference(ColibriConferenceIQ conferenceIq)
-            throws ConferenceNotFoundException, InGracefulShutdownException
+    private @NotNull Conference getOrCreateConference(ConferenceModifyIQ conferenceModifyIQ)
+        throws InGracefulShutdownException, XmppStringprepException,
+            ConferenceAlreadyExistsException, ConferenceNotFoundException
     {
-        String conferenceId = conferenceIq.getID();
-        if (conferenceId == null && isShutdownInProgress())
-        {
-            throw new InGracefulShutdownException();
-        }
+        String meetingId = conferenceModifyIQ.getMeetingId();
 
-        if (conferenceId == null)
+        synchronized(conferencesById)
         {
-            return createConference(
-                    conferenceIq.getName(),
-                    ColibriUtil.parseGid(conferenceIq.getGID()),
-                    conferenceIq.getMeetingId());
-        }
-        else
-        {
-            Conference conference = getConference(conferenceId);
-            if (conference == null)
+            Conference conference = getConferenceByMeetingId(meetingId);
+
+            if (conferenceModifyIQ.getCreate())
             {
-                throw new ConferenceNotFoundException();
-            }
-            return conference;
-        }
-    }
+                if (conference != null)
+                {
+                    logger.warn("Will not create conference, conference already exists for meetingId=" + meetingId);
+                    throw new ConferenceAlreadyExistsException();
+                }
+                if (isInGracefulShutdown())
+                {
+                    logger.warn("Will not create conference in shutdown mode.");
+                    throw new InGracefulShutdownException();
+                }
 
-    /**
-     * Handles <tt>HealthCheckIQ</tt> by performing health check on this
-     * <tt>Videobridge</tt> instance.
-     *
-     * @param healthCheckIQ the <tt>HealthCheckIQ</tt> to be handled.
-     * @return IQ with &quot;result&quot; type if the health check succeeded or
-     * IQ with &quot;error&quot; type if something went wrong.
-     * {@link StanzaError.Condition#internal_server_error} is returned when the
-     * health check fails or {@link StanzaError.Condition#not_authorized} if the
-     * request comes from a JID that is not authorized to do health checks on
-     * this instance.
-     */
-    public IQ handleHealthCheckIQ(HealthCheckIQ healthCheckIQ)
-    {
-        try
-        {
-            return IQ.createResultIQ(healthCheckIQ);
-        }
-        catch (Exception e)
-        {
-            logger.warn("Exception while handling health check IQ request", e);
-            return
-                IQUtils.createError(
-                        healthCheckIQ,
-                        StanzaError.Condition.internal_server_error,
-                        e.getMessage());
+                String conferenceName = conferenceModifyIQ.getConferenceName();
+                return createConference(
+                    conferenceName == null ? null : JidCreate.entityBareFrom(conferenceName),
+                    meetingId,
+                    conferenceModifyIQ.isRtcstatsEnabled()
+                );
+            }
+            else
+            {
+                if (conference == null)
+                {
+                    logger.warn("Conference with meeting_id=" + meetingId + " not found.");
+                    throw new ConferenceNotFoundException();
+                }
+                return conference;
+            }
         }
     }
 
@@ -463,27 +470,31 @@ public class Videobridge
      */
     public void shutdown(boolean graceful)
     {
-        logger.warn("Received shutdown request, graceful=" + graceful);
-        if (graceful)
-        {
-            enableGracefulShutdownMode();
-        }
-        else
-        {
-            logger.warn("Will shutdown in 1 second.");
-            new Thread(() -> {
-                try
-                {
-                    Thread.sleep(1000);
-                    logger.warn("JVB force shutdown - now");
-                    System.exit(0);
-                }
-                catch (InterruptedException e)
-                {
-                    throw new RuntimeException(e);
-                }
-            }, "ForceShutdownThread").start();
-        }
+        shutdownManager.initiateShutdown(graceful);
+        shutdownManager.maybeShutdown(statistics.currentLocalEndpoints.get());
+    }
+
+    /**
+     * Whether the bridge is in "drain" mode. The bridge will not be assigned to new
+     * conferences when in this mode.
+     */
+    private boolean drainMode = VideobridgeConfig.Companion.getInitialDrainMode();
+
+    /**
+     * Handles a drain request.
+     */
+    public void setDrainMode(boolean enable)
+    {
+        logger.info("Received drain request. enable=" + enable);
+        drainMode = enable;
+    }
+
+    /**
+     * Query the drain state.
+     */
+    public boolean getDrainMode()
+    {
+        return drainMode;
     }
 
     /**
@@ -492,30 +503,14 @@ public class Videobridge
      * @return {@code true} if this instance has entered graceful shutdown mode;
      * otherwise, {@code false}
      */
-    public boolean isShutdownInProgress()
+    public boolean isInGracefulShutdown()
     {
-        return shutdownInProgress;
+        return shutdownManager.getState() == ShutdownState.GRACEFUL_SHUTDOWN;
     }
 
-    /**
-     * Triggers the shutdown given that we're in graceful shutdown mode and
-     * there are no conferences currently in progress.
-     */
-    private void maybeDoShutdown()
+    public ShutdownState getShutdownState()
     {
-        if (!shutdownInProgress)
-        {
-            return;
-        }
-
-        synchronized (conferencesById)
-        {
-            if (conferencesById.isEmpty())
-            {
-                logger.info("Videobridge is shutting down NOW");
-                shutdownService.beginShutdown();
-            }
-        }
+        return shutdownManager.getState();
     }
 
     /**
@@ -529,11 +524,14 @@ public class Videobridge
 
         videobridgeExpireThread.start();
 
-        // <conference>
-        ProviderManager.addIQProvider(
-                ColibriConferenceIQ.ELEMENT,
-                ColibriConferenceIQ.NAMESPACE,
-                new ColibriIQProvider());
+        // <force-shutdown>
+        ForcefulShutdownIqProvider.registerIQProvider();
+
+        // <graceful-shutdown>
+        GracefulShutdownIqProvider.registerIQProvider();
+
+        // <stats>
+        new ColibriStatsIqProvider(); // registers itself with Smack
 
         // ICE-UDP <transport>
         ProviderManager.addExtensionProvider(
@@ -541,18 +539,27 @@ public class Videobridge
                 IceUdpTransportPacketExtension.NAMESPACE,
                 new DefaultPacketExtensionProvider<>(IceUdpTransportPacketExtension.class));
 
-        DefaultPacketExtensionProvider<CandidatePacketExtension> candidatePacketExtensionProvider
-                = new DefaultPacketExtensionProvider<>(CandidatePacketExtension.class);
+        // RAW-UDP <candidate xmlns=urn:xmpp:jingle:transports:raw-udp:1>
+        DefaultPacketExtensionProvider<UdpCandidatePacketExtension> udpCandidatePacketExtensionProvider
+                = new DefaultPacketExtensionProvider<>(UdpCandidatePacketExtension.class);
+        ProviderManager.addExtensionProvider(
+                UdpCandidatePacketExtension.ELEMENT,
+                UdpCandidatePacketExtension.NAMESPACE,
+                udpCandidatePacketExtensionProvider);
 
-        // ICE-UDP <candidate>
+        // ICE-UDP <candidate xmlns=urn:xmpp:jingle:transports:ice-udp:1">
+        DefaultPacketExtensionProvider<IceCandidatePacketExtension> iceCandidatePacketExtensionProvider
+                = new DefaultPacketExtensionProvider<>(IceCandidatePacketExtension.class);
         ProviderManager.addExtensionProvider(
-                CandidatePacketExtension.ELEMENT,
-                IceUdpTransportPacketExtension.NAMESPACE,
-                candidatePacketExtensionProvider);
+                IceCandidatePacketExtension.ELEMENT,
+                IceCandidatePacketExtension.NAMESPACE,
+                iceCandidatePacketExtensionProvider);
+
+        // ICE <rtcp-mux/>
         ProviderManager.addExtensionProvider(
-                RtcpmuxPacketExtension.ELEMENT,
-                IceUdpTransportPacketExtension.NAMESPACE,
-                new DefaultPacketExtensionProvider<>(RtcpmuxPacketExtension.class));
+                IceRtcpmuxPacketExtension.ELEMENT,
+                IceRtcpmuxPacketExtension.NAMESPACE,
+                new DefaultPacketExtensionProvider<>(IceRtcpmuxPacketExtension.class));
 
         // DTLS-SRTP <fingerprint>
         ProviderManager.addExtensionProvider(
@@ -561,10 +568,10 @@ public class Videobridge
                 new DefaultPacketExtensionProvider<>(DtlsFingerprintPacketExtension.class));
 
         // Health-check
-        ProviderManager.addIQProvider(
-                HealthCheckIQ.ELEMENT,
-                HealthCheckIQ.NAMESPACE,
-                new HealthCheckIQProvider());
+        HealthCheckIQProvider.registerIQProvider();
+
+        // Colibri2
+        IqProviderUtils.registerProviders();
     }
 
     /**
@@ -575,10 +582,7 @@ public class Videobridge
     public void stop()
     {
         videobridgeExpireThread.stop();
-        if (loadSamplerTask != null)
-        {
-            loadSamplerTask.cancel(true);
-        }
+        jvbLoadManager.stop();
     }
 
     /**
@@ -598,11 +602,17 @@ public class Videobridge
     public OrderedJsonObject getDebugState(String conferenceId, String endpointId, boolean full)
     {
         OrderedJsonObject debugState = new OrderedJsonObject();
-        debugState.put("shutdownInProgress", shutdownInProgress);
+        debugState.put("shutdownState", shutdownManager.getState().toString());
+        debugState.put("drain", drainMode);
         debugState.put("time", System.currentTimeMillis());
 
         debugState.put("load-management", jvbLoadManager.getStats());
-        debugState.put(Endpoint.overallAverageBridgeJitter.name, Endpoint.overallAverageBridgeJitter.get());
+
+        Double jitter = PacketTransitStats.getBridgeJitter();
+        if (jitter != null)
+        {
+            debugState.put("overall_bridge_jitter", jitter);
+        }
 
         JSONObject conferences = new JSONObject();
         debugState.put("conferences", conferences);
@@ -645,13 +655,13 @@ public class Videobridge
             getJsonFromQueueStatisticsAndErrorHandler(Endpoint.queueErrorCounter,
                 "Endpoint-outgoing-packet-queue"));
         queueStats.put(
-            "octo_receive_queue",
-            getJsonFromQueueStatisticsAndErrorHandler(ConfOctoTransport.queueErrorCounter,
-                "octo-tentacle-outgoing-packet-queue"));
+            "relay_srtp_send_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(Relay.queueErrorCounter,
+                "Relay-outgoing-packet-queue"));
         queueStats.put(
-            "octo_send_queue",
-            getJsonFromQueueStatisticsAndErrorHandler(OctoRtpReceiver.queueErrorCounter,
-                "octo-transceiver-incoming-packet-queue"));
+            "relay_endpoint_sender_srtp_send_queue",
+            getJsonFromQueueStatisticsAndErrorHandler(RelayEndpointSender.queueErrorCounter,
+                "RelayEndpointSender-outgoing-packet-queue"));
         queueStats.put(
             "rtp_receiver_queue",
             getJsonFromQueueStatisticsAndErrorHandler(RtpReceiverImpl.Companion.getQueueErrorCounter(),
@@ -674,7 +684,6 @@ public class Videobridge
         return queueStats;
     }
 
-    @SuppressWarnings("unchecked")
     private OrderedJsonObject getJsonFromQueueStatisticsAndErrorHandler(
             CountingErrorHandler countingErrorHandler,
             String queueName)
@@ -693,26 +702,25 @@ public class Videobridge
         return json;
     }
 
+    @NotNull
     public Version getVersion()
     {
         return version;
     }
 
-    public void addEventHandler(EventHandler eventHandler)
+    /**
+     * Get the release ID of this videobridge.
+     * @return The release ID. Returns null if not in use.
+     */
+    public @Nullable String getReleaseId()
     {
-        eventEmitter.addHandler(eventHandler);
-    }
-
-    public void removeEventHandler(EventHandler eventHandler)
-    {
-        eventEmitter.removeHandler(eventHandler);
+        return releaseId;
     }
 
     private class XmppConnectionEventHandler implements XmppConnection.EventHandler
     {
-        @NotNull
         @Override
-        public void colibriConferenceIqReceived(@NotNull XmppConnection.ColibriRequest request)
+        public void colibriRequestReceived(@NotNull XmppConnection.ColibriRequest request)
         {
             handleColibriRequest(request);
         }
@@ -741,7 +749,17 @@ public class Videobridge
         @Override
         public IQ healthCheckIqReceived(@NotNull HealthCheckIQ iq)
         {
-            return handleHealthCheckIQ(iq);
+            Result result = jvbHealthChecker.getResult();
+            if (result.getSuccess())
+            {
+                return IQ.createResultIQ(iq);
+            }
+            else
+            {
+                return IQ.createErrorResponse(
+                        iq,
+                        StanzaError.from(StanzaError.Condition.internal_server_error, result.getMessage()).build());
+            }
         }
     }
 
@@ -757,33 +775,39 @@ public class Videobridge
          * (and which would otherwise result in video suspension).
          * (see {@link AimdRateControl#incomingBitrateExpirations}).
          */
-        public AtomicInteger incomingBitrateExpirations = new AtomicInteger(0);
+        public CounterMetric incomingBitrateExpirations = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "incoming_bitrate_expirations",
+                "Number of times our AIMDs have expired the incoming bitrate.");
 
         /**
-         * The cumulative/total number of conferences that had all of their
-         * channels failed because there was no transport activity (which
-         * includes those that failed because there was no payload activity).
+         * The cumulative/total number of conferences in which ALL of the endpoints failed ICE.
          */
-        public AtomicInteger totalFailedConferences = new AtomicInteger(0);
+        public CounterMetric failedConferences = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "failed_conferences",
+                "Number of conferences in which ALL of the endpoints failed ICE.");
 
         /**
-         * The cumulative/total number of conferences that had some of their
-         * channels failed because there was no transport activity (which
-         * includes those that failed because there was no payload activity).
+         * The cumulative/total number of conferences in which SOME of the endpoints failed ICE.
          */
-        public AtomicInteger totalPartiallyFailedConferences = new AtomicInteger(0);
+        public CounterMetric partiallyFailedConferences = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "partially_failed_conferences",
+                "Number of conferences in which SOME of the endpoints failed ICE.");
 
         /**
          * The cumulative/total number of conferences completed/expired on this
          * {@link Videobridge}.
          */
-        public AtomicInteger totalConferencesCompleted = new AtomicInteger(0);
+        public CounterMetric conferencesCompleted = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "conferences_completed",
+                "The total number of conferences completed/expired on the Videobridge.");
 
         /**
          * The cumulative/total number of conferences created on this
          * {@link Videobridge}.
          */
-        public AtomicInteger totalConferencesCreated = new AtomicInteger(0);
+        public CounterMetric conferencesCreated = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "conferences_created",
+                "The total number of conferences created on the Videobridge.");
 
         /**
          * The total duration in seconds of all completed conferences on this
@@ -812,51 +836,36 @@ public class Videobridge
         public AtomicLong totalLossDegradedParticipantMs = new AtomicLong();
 
         /**
-         * The total number of times an ICE Agent failed to establish
-         * connectivity.
-         */
-        public AtomicInteger totalIceFailed = new AtomicInteger();
-
-        /**
-         * The total number of times an ICE Agent succeeded.
-         */
-        public AtomicInteger totalIceSucceeded = new AtomicInteger();
-
-        /**
-         * The total number of times an ICE Agent succeeded and the selected
-         * candidate was a TCP candidate.
-         */
-        public AtomicInteger totalIceSucceededTcp = new AtomicInteger();
-
-        /**
-         * The total number of times an ICE Agent succeeded and the selected
-         * candidate pair included a relayed candidate.
-         */
-        public AtomicInteger totalIceSucceededRelayed = new AtomicInteger();
-
-        /**
          * The total number of messages received from the data channels of
          * the endpoints of this conference.
          */
-        public AtomicLong totalDataChannelMessagesReceived = new AtomicLong();
+        public CounterMetric dataChannelMessagesReceived = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "data_channel_messages_received",
+                "Number of messages received from the data channels of the endpoints of this conference.");
 
         /**
          * The total number of messages sent via the data channels of the
          * endpoints of this conference.
          */
-        public AtomicLong totalDataChannelMessagesSent = new AtomicLong();
+        public CounterMetric dataChannelMessagesSent = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "data_channel_messages_sent",
+                "Number of messages sent via the data channels of the endpoints of this conference.");
 
         /**
          * The total number of messages received from the data channels of
          * the endpoints of this conference.
          */
-        public AtomicLong totalColibriWebSocketMessagesReceived = new AtomicLong();
+        public CounterMetric colibriWebSocketMessagesReceived = VideobridgeMetricsContainer.getInstance()
+                .registerCounter("colibri_web_socket_messages_received",
+                        "Number of messages received from the data channels of the endpoints of this conference.");
 
         /**
          * The total number of messages sent via the data channels of the
          * endpoints of this conference.
          */
-        public AtomicLong totalColibriWebSocketMessagesSent = new AtomicLong();
+        public CounterMetric colibriWebSocketMessagesSent = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "colibri_web_socket_messages_sent",
+                "Number of messages sent via the data channels of the endpoints of this conference.");
 
         /**
          * The total number of bytes received in RTP packets in conferences on
@@ -877,37 +886,102 @@ public class Videobridge
          * videobridge. Note that this is only updated when conferences
          * expire.
          */
-        public AtomicLong totalPacketsReceived = new AtomicLong();
+        public CounterMetric packetsReceived = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "packets_received",
+                "Number of RTP packets received in conferences on this videobridge.");
 
         /**
          * The total number of RTP packets sent in conferences on this
          * videobridge. Note that this is only updated when conferences
          * expire.
          */
-        public AtomicLong totalPacketsSent = new AtomicLong();
+        public CounterMetric packetsSent = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "packets_sent",
+                "Number of RTP packets sent in conferences on this videobridge.");
 
+        /**
+         * The total number of bytes received by relays in RTP packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalRelayBytesReceived = new AtomicLong();
+
+        /**
+         * The total number of bytes sent by relays in RTP packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalRelayBytesSent = new AtomicLong();
+
+        /**
+         * The total number of RTP packets received by relays in conferences on this
+         * videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public CounterMetric relayPacketsReceived = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "relay_packets_received",
+                "Number of RTP packets received by relays in conferences on this videobridge.");
+
+        /**
+         * The total number of RTP packets sent by relays in conferences on this
+         * videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public CounterMetric relayPacketsSent = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "relay_packets_sent",
+                "Number of RTP packets sent by relays in conferences on this videobridge.");
         /**
          * The total number of endpoints created.
          */
-        public AtomicInteger totalEndpoints = new AtomicInteger();
+        public CounterMetric totalEndpoints = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "endpoints",
+                "The total number of endpoints created.");
+
+        /**
+         * The total number of visitor endpoints.
+         */
+        public CounterMetric totalVisitors = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "visitors",
+                "The total number of visitor endpoints created.");
 
         /**
          * The number of endpoints which had not established an endpoint
          * message transport even after some delay.
          */
-        public AtomicInteger numEndpointsNoMessageTransportAfterDelay = new AtomicInteger();
+        public CounterMetric numEndpointsNoMessageTransportAfterDelay = VideobridgeMetricsContainer.getInstance()
+                .registerCounter("endpoints_no_message_transport_after_delay",
+                "Number of endpoints which had not established a relay message transport even after some delay.");
+
+        /**
+         * The total number of relays created.
+         */
+        public CounterMetric totalRelays = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "relays",
+                "The total number of relays created.");
+
+        /**
+         * The number of relays which had not established a relay
+         * message transport even after some delay.
+         */
+        public CounterMetric numRelaysNoMessageTransportAfterDelay = VideobridgeMetricsContainer.getInstance()
+                .registerCounter("relays_no_message_transport_after_delay",
+                "Number of relays which had not established a relay message transport even after some delay.");
 
         /**
          * The total number of times the dominant speaker in any conference
          * changed.
          */
-        public LongAdder totalDominantSpeakerChanges = new LongAdder();
+        public CounterMetric dominantSpeakerChanges = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "dominant_speaker_changes",
+                "Number of times the dominant speaker in any conference changed.");
 
         /**
          * Number of endpoints whose ICE connection was established, but DTLS
          * wasn't (at the time of expiration).
          */
-        public AtomicInteger dtlsFailedEndpoints = new AtomicInteger();
+        public CounterMetric endpointsDtlsFailed = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "endpoints_dtls_failed",
+                "Number of endpoints whose ICE connection was established, but DTLS wasn't (at time of expiration).");
 
         /**
          * The stress level for this bridge
@@ -916,20 +990,68 @@ public class Videobridge
 
         /** Distribution of energy scores for discarded audio packets  */
         public BucketStats tossedPacketsEnergy = new BucketStats(
-                LongStream.range(1, 16).map(w -> 8 * w - 1).toArray(), "", "");
+                Stream.iterate(0L, n -> n + 1).limit(17)
+                        .map(w -> Math.max(8 * w - 1, 0))
+                        .collect(Collectors.toList()),
+                "", "");
 
         /** Number of preemptive keyframe requests that were sent. */
-        public AtomicInteger preemptiveKeyframeRequestsSent = new AtomicInteger();
+        public CounterMetric preemptiveKeyframeRequestsSent = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "preemptive_keyframe_requests_sent",
+                "Number of preemptive keyframe requests that were sent.");
 
         /** Number of preemptive keyframe requests that were not sent because no endpoints were in stage view. */
-        public AtomicInteger preemptiveKeyframeRequestsSuppressed = new AtomicInteger();
+        public CounterMetric preemptiveKeyframeRequestsSuppressed = VideobridgeMetricsContainer.getInstance()
+                .registerCounter("preemptive_keyframe_requests_suppressed",
+                "Number of preemptive keyframe requests that were not sent because no endpoints were in stage view.");
 
+        /** The total number of keyframes that were received (updated on endpoint expiration). */
+        public CounterMetric keyframesReceived = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "keyframes_received",
+                "Number of keyframes that were received (updated on endpoint expiration).");
+
+        /**
+         * The total number of times the layering of an incoming video stream changed (updated on endpoint expiration).
+         */
+        public CounterMetric layeringChangesReceived = VideobridgeMetricsContainer.getInstance().registerCounter(
+                "layering_changes_received",
+                "Number of times the layering of an incoming video stream changed (updated on endpoint expiration).");
+
+        /**
+         * The total duration, in milliseconds, of video streams (SSRCs) that were received. For example, if an
+         * endpoint sends simulcast with 3 SSRCs for 1 minute it would contribute a total of 3 minutes. Suspended
+         * streams do not contribute to this duration.
+         *
+         * This is updated on endpoint expiration.
+         */
+        public AtomicLong totalVideoStreamMillisecondsReceived = new AtomicLong();
+
+        /**
+         * Number of local endpoints that exist currently.
+         */
+        public LongGaugeMetric currentLocalEndpoints = VideobridgeMetricsContainer.getInstance().registerLongGauge(
+                "local_endpoints",
+                "Number of local endpoints that exist currently."
+        );
+
+        /**
+         * Number of visitor endpoints that exist currently.
+         */
+        public LongGaugeMetric currentVisitors = VideobridgeMetricsContainer.getInstance().registerLongGauge(
+                "current_visitors",
+                "Number of visitor endpoints."
+        );
+
+        /**
+         * Current number of conferences.
+         */
+        public LongGaugeMetric currentConferences = VideobridgeMetricsContainer.getInstance().registerLongGauge(
+                "conferences",
+                "Current number of conferences."
+        );
     }
 
-    public interface EventHandler {
-        void conferenceCreated(@NotNull Conference conference);
-        void conferenceExpired(@NotNull Conference conference);
-    }
     private static class ConferenceNotFoundException extends Exception {}
+    private static class ConferenceAlreadyExistsException extends Exception {}
     private static class InGracefulShutdownException extends Exception {}
 }

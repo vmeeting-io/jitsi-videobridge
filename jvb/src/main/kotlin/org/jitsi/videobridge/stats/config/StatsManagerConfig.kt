@@ -25,10 +25,8 @@ import org.jitsi.metaconfig.config
 import org.jitsi.videobridge.xmpp.XmppConnection
 import java.time.Duration
 
-class StatsManagerConfig {
-    /**
-     * The interval at which the stats are pushed
-     */
+class StatsManagerConfig private constructor() {
+    /** The interval at which the stats are collected. */
     val interval: Duration by config {
         "org.jitsi.videobridge.STATISTICS_INTERVAL".from(JitsiConfig.legacyConfig).convertFrom(Duration::ofMillis)
         "videobridge.stats.interval".from(JitsiConfig.newConfig)
@@ -42,7 +40,7 @@ class StatsManagerConfig {
      * stats transport configs from old and new config together).
      *
      * These are now obsolete and only maintained for backward compatibility. Transports should be configured in the
-     * modules that define them. See e.g. the implementations in [CallstatsService] and [XmppConnection].
+     * modules that define them. See e.g. the implementation and [XmppConnection].
      */
     val transportConfigs: List<StatsTransportConfig> by config {
         "org.jitsi.videobridge."
@@ -79,7 +77,6 @@ class StatsManagerConfig {
             } ?: this@StatsManagerConfig.interval
             when (transportType) {
                 "muc" -> StatsTransportConfig.MucStatsTransportConfig(interval)
-                "callstats.io" -> StatsTransportConfig.CallStatsIoStatsTransportConfig(interval)
                 else -> null
             }
         }
@@ -93,9 +90,13 @@ class StatsManagerConfig {
         }
         return when (getString("type")) {
             "muc" -> StatsTransportConfig.MucStatsTransportConfig(interval)
-            "callstatsio" -> StatsTransportConfig.CallStatsIoStatsTransportConfig(interval)
             else -> null
         }
+    }
+
+    companion object {
+        @JvmField
+        val config = StatsManagerConfig()
     }
 }
 
@@ -106,5 +107,4 @@ sealed class StatsTransportConfig(
     val interval: Duration
 ) {
     class MucStatsTransportConfig(interval: Duration) : StatsTransportConfig(interval)
-    class CallStatsIoStatsTransportConfig(interval: Duration) : StatsTransportConfig(interval)
 }

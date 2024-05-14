@@ -1,7 +1,7 @@
 Introduction
 ============
-Jitsi Videobridge exports statistics/metrics as key-value pairs in two ways: via a REST interface which can be
-queried on demand and as periodic reports published in an XMPP MUC.
+Jitsi Videobridge exports statistics/metrics as key-value pairs in three ways: in a custom JSON format, as Prometheus
+metrics and as periodic reports published in an XMPP MUC.
 
 # REST
 The statistics are available through the `/colibri/stats` endpoint on the [private REST interface](rest.md) 
@@ -15,10 +15,24 @@ The statistics are available through the `/colibri/stats` endpoint on the [priva
 Note that the report itself is generated periodically and a cached version is returned. The period defaults to 5 seconds
 and can be configured with the `videobridge.stats.interval` property in `jvb.conf`.
 
+# Prometheus
+Metrics are exposed in a Prometheus/openmetrics format at `/metrics` on the private HTTP interface. Not all metrics are
+currently available in this format, and improving this is a work in progress.
+```commandline
+# Query prometheus metrics in openmetrics format
+curl 0:8080/metrics -H 'Accept: application/openmetrics-text'
+
+# Query prometheus metrics in 004 format
+curl 0:8080/metrics -H 'Accept: text/plain; version=0.0.4;'
+
+# Query prometheus metrics in a JSON key-value format
+curl 0:8080/metrics -H 'Accept: application/json'
+```
+
 # XMPP MUC
 The statistics can also be published periodically via XMPP (which allows jicofo to monitor a set of bridges and perform
 load balancing, or allows an application to monitor the MUC and collect metrics from multiple bridges). In this case the
-key-vlue pairrs are represented in XML format with a `stats` element like this:
+key-value pairs are represented in XML format with a `stats` element like this:
 ```xml
 <stats xmlns=' http://jitsi.org/protocol/colibri'>
 	<stat value='value' name='key'/>
@@ -86,8 +100,6 @@ milliseconds.
 * `stress_level` - current stress level on the bridge, with 0 indicating no load and 1 indicating the load is at full
 capacity (though values >1 are permitted).
 * `threads` - current number of JVM threads.
-* `tossedPacketsEnergy` - statistics about the energy level of packets which were discarded due to not coming from one
-of the loudest speakers in a conference.
 * `total_bytes_received` - total number of bytes received in RTP.
 * `total_bytes_received_octo` - total number of bytes received on the `octo` channel.
 * `total_bytes_sent` - total number of bytes sent in RTP.

@@ -32,7 +32,9 @@ public enum DebugFeatures
     TASK_POOL_STATS("task-pool-stats"),
     NODE_TRACING("node-tracing"),
     ICE_STATS("ice-stats"),
-    XMPP_DELAY_STATS("xmpp-delay-stats");
+    XMPP_DELAY_STATS("xmpp-delay-stats"),
+    TOSSED_PACKET_STATS("tossed-packet-stats"),
+    CONFERENCE_PACKET_STATS("conference-packet-stats");
 
     private final String value;
 

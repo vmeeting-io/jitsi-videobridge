@@ -18,13 +18,11 @@ package org.jitsi.videobridge.rest
 
 import org.jitsi.config.JitsiConfig
 import org.jitsi.metaconfig.config
-import org.jitsi.videobridge.Videobridge
 
-class RestConfig {
+class RestConfig private constructor() {
     private val colibriRestEnabled: Boolean by config {
         // If the value was passed via a command line arg, we set it as a system
         // variable at this path, which the new config will pick up
-        Videobridge.REST_API_PNAME.from(JitsiConfig.newConfig)
         "videobridge.apis.rest.enabled".from(JitsiConfig.newConfig)
     }
     private val legacyColibriRestEnabled: Boolean by config {
@@ -67,28 +65,43 @@ class RestConfig {
         "org.jitsi.videobridge.ENABLE_REST_SHUTDOWN".from(JitsiConfig.legacyConfig)
         "videobridge.rest.shutdown.enabled".from(JitsiConfig.newConfig)
     }
+
     /**
      * Due to historical reasons the shutdown API is only enabled when the COLIBRI API is enabled.
      */
     private val shutdownEnabled
         get() = colibriEnabled && shutdownEnabledProperty
 
+    /**
+     * The drain API.
+     */
+    private val drainEnabled: Boolean by config {
+        "videobridge.rest.drain.enabled".from(JitsiConfig.newConfig)
+    }
+
     private val versionEnabled: Boolean by config {
         "videobridge.rest.version.enabled".from(JitsiConfig.newConfig)
+    }
+
+    private val prometheusEnabled: Boolean by config {
+        "videobridge.rest.prometheus.enabled".from(JitsiConfig.newConfig)
     }
 
     /**
      * Whether any of the REST APIs are enabled by the configuration. If there aren't, the HTTP server doesn't need to
      * be started at all.
      */
-    fun isEnabled() = colibriEnabled || debugEnabled || healthEnabled || shutdownEnabled || versionEnabled
+    fun isEnabled() = colibriEnabled || debugEnabled || healthEnabled ||
+        shutdownEnabled || drainEnabled || versionEnabled || prometheusEnabled
 
     fun isEnabled(api: RestApis) = when (api) {
         RestApis.COLIBRI -> colibriEnabled
         RestApis.DEBUG -> debugEnabled
         RestApis.HEALTH -> healthEnabled
         RestApis.SHUTDOWN -> shutdownEnabled
+        RestApis.DRAIN -> drainEnabled
         RestApis.VERSION -> versionEnabled
+        RestApis.PROMETHEUS -> prometheusEnabled
     }
 
     companion object {

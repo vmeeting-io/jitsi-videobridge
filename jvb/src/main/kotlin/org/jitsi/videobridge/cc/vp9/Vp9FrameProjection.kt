@@ -20,6 +20,7 @@ import org.jitsi.rtp.util.RtpUtils.Companion.applySequenceNumberDelta
 import org.jitsi.rtp.util.isOlderThan
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging.TimeSeriesLogger
+import java.time.Instant
 
 /**
  * Represents a VP9 frame projection. It puts together all the necessary bits
@@ -81,14 +82,15 @@ internal constructor(
      * A timestamp of when this instance was created. It's used to calculate
      * RTP timestamps when we switch encodings.
      */
-    val createdMs: Long
+    val created: Instant?
 ) {
 
     /**
      * -1 if this projection is still "open" for new, later packets.
      * Projections can be closed when we switch away from their encodings.
      */
-    private var closedSeq = -1
+    var closedSeq = -1
+        private set
 
     /**
      * Ctor.
@@ -113,7 +115,7 @@ internal constructor(
         pictureId = 0,
         tl0PICIDX = 0,
         mark = false,
-        createdMs = 0
+        created = null
     )
 
     fun rewriteSeqNo(seq: Int): Int {
@@ -174,7 +176,9 @@ internal constructor(
         synchronized(vp9Frame) {
             return if (closedSeq < 0) {
                 true
-            } else rtpPacket.sequenceNumber isOlderThan closedSeq
+            } else {
+                rtpPacket.sequenceNumber isOlderThan closedSeq
+            }
         }
     }
 
