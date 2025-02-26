@@ -19,39 +19,41 @@ package org.jitsi.videobridge
 import org.eclipse.jetty.servlet.ServletHolder
 import org.glassfish.jersey.servlet.ServletContainer
 import org.ice4j.ice.harvest.MappingCandidateHarvesters
-import org.jitsi.cmd.CmdLine
 import org.jitsi.config.JitsiConfig
+import org.jitsi.metaconfig.ConfigException
 import org.jitsi.metaconfig.MetaconfigLogger
 import org.jitsi.metaconfig.MetaconfigSettings
+import org.jitsi.nlj.dtls.DtlsConfig
 import org.jitsi.rest.JettyBundleActivatorConfig
 import org.jitsi.rest.createServer
 import org.jitsi.rest.enableCors
 import org.jitsi.rest.isEnabled
 import org.jitsi.rest.servletContextHandler
 import org.jitsi.shutdown.ShutdownServiceImpl
-import org.jitsi.stats.media.Utils
 import org.jitsi.utils.logging2.LoggerImpl
 import org.jitsi.utils.queue.PacketQueue
-import org.jitsi.videobridge.health.JvbHealthChecker
 import org.jitsi.videobridge.ice.Harvesters
 import org.jitsi.videobridge.rest.root.Application
 import org.jitsi.videobridge.stats.MucStatsTransport
 import org.jitsi.videobridge.stats.StatsCollector
 import org.jitsi.videobridge.stats.VideobridgeStatistics
-import org.jitsi.videobridge.stats.callstats.CallstatsService
 import org.jitsi.videobridge.util.TaskPools
 import org.jitsi.videobridge.version.JvbVersionService
 import org.jitsi.videobridge.websocket.ColibriWebSocketService
 import org.jitsi.videobridge.xmpp.XmppConnection
 import org.jitsi.videobridge.xmpp.config.XmppClientConnectionConfig
 import org.jxmpp.stringprep.XmppStringPrepUtil
+import java.time.Clock
 import kotlin.concurrent.thread
-import org.jitsi.videobridge.octo.singleton as octoRelayService
+import kotlin.system.exitProcess
 import org.jitsi.videobridge.websocket.singleton as webSocketServiceSingleton
 
-fun main(args: Array<String>) {
-    val cmdLine = CmdLine().apply { parse(args) }
+fun main() {
     val logger = LoggerImpl("org.jitsi.videobridge.Main")
+
+    Thread.setDefaultUncaughtExceptionHandler { thread, exception ->
+        logger.error("An uncaught exception occurred in thread=$thread", exception)
+    }
 
     setupMetaconfigLogger()
 
@@ -65,16 +67,6 @@ fun main(args: Array<String>) {
     //  to be passed.
     System.setProperty("org.eclipse.jetty.util.log.class", "org.eclipse.jetty.util.log.JavaUtilLog")
 
-    // Before initializing the application programming interfaces (APIs) of
-    // Jitsi Videobridge, set any System properties which they use and which
-    // may be specified by the command-line arguments.
-    cmdLine.getOptionValue("--apis")?.let {
-        System.setProperty(
-            Videobridge.REST_API_PNAME,
-            it.contains(Videobridge.REST_API).toString()
-        )
-    }
-
     // Reload the Typesafe config used by ice4j, because the original was initialized before the new system
     // properties were set.
     JitsiConfig.reloadNewConfig()
@@ -85,32 +77,35 @@ fun main(args: Array<String>) {
 
     startIce4j()
 
-    XmppStringPrepUtil.setMaxCacheSizes(XmppClientConnectionConfig.jidCacheSize)
+    // Initialize, binding on the main ICE port.
+    Harvesters.init()
+
+    XmppStringPrepUtil.setMaxCacheSizes(XmppClientConnectionConfig.config.jidCacheSize)
     PacketQueue.setEnableStatisticsDefault(true)
+
+    // Trigger an exception early in case the DTLS cipher suites are misconfigured
+    try {
+        DtlsConfig.config.cipherSuites
+    } catch (ce: ConfigException) {
+        logger.error("Dtls configuration error: $ce")
+        // According to https://freedesktop.org/software/systemd/man/systemd.exec…html#Process%20Exit%20Code
+        // 78 means "configuration error"
+        exitProcess(78)
+    }
 
     val xmppConnection = XmppConnection().apply { start() }
     val shutdownService = ShutdownServiceImpl()
-    val videobridge = Videobridge(xmppConnection, shutdownService, versionService.currentVersion).apply { start() }
-    val healthChecker = JvbHealthChecker().apply { start() }
-    val octoRelayService = octoRelayService().get()?.apply { start() }
-    val statsCollector = StatsCollector(VideobridgeStatistics(videobridge, octoRelayService, xmppConnection)).apply {
+    val videobridge = Videobridge(
+        xmppConnection,
+        shutdownService,
+        versionService.currentVersion,
+        VersionConfig.config.release,
+        Clock.systemUTC()
+    ).apply { start() }
+    val healthChecker = videobridge.jvbHealthChecker
+    val statsCollector = StatsCollector(VideobridgeStatistics(videobridge, xmppConnection)).apply {
         start()
-        addTransport(MucStatsTransport(xmppConnection), xmppConnection.config.presenceInterval.toMillis())
-    }
-
-    val callstats = if (CallstatsService.config.enabled) {
-        CallstatsService(videobridge.version).apply {
-            start {
-                statsTransport?.let { statsTransport ->
-                    statsCollector.addTransport(statsTransport, CallstatsService.config.interval.toMillis())
-                } ?: throw IllegalStateException("Stats transport is null after the service is started")
-
-                videobridge.addEventHandler(videobridgeEventHandler)
-            }
-        }
-    } else {
-        logger.info("Not starting CallstatsService, disabled in configuration.")
-        null
+        addTransport(MucStatsTransport(xmppConnection), XmppClientConnectionConfig.config.presenceInterval.toMillis())
     }
 
     val publicServerConfig = JettyBundleActivatorConfig(
@@ -162,15 +157,7 @@ fun main(args: Array<String>) {
 
     logger.info("Bridge shutting down")
     healthChecker.stop()
-    octoRelayService?.stop()
     xmppConnection.stop()
-    callstats?.let {
-        videobridge.removeEventHandler(it.videobridgeEventHandler)
-        it.statsTransport?.let { statsTransport ->
-            statsCollector.removeTransport(statsTransport)
-        }
-        it.stop()
-    }
     statsCollector.stop()
 
     try {
@@ -185,6 +172,8 @@ fun main(args: Array<String>) {
     TaskPools.SCHEDULED_POOL.shutdownNow()
     TaskPools.CPU_POOL.shutdownNow()
     TaskPools.IO_POOL.shutdownNow()
+
+    exitProcess(0)
 }
 
 private fun setupMetaconfigLogger() {
@@ -208,7 +197,6 @@ private fun setSystemPropertyDefaults() {
 
 private fun getSystemPropertyDefaults(): Map<String, String> {
     val defaults = mutableMapOf<String, String>()
-    Utils.getCallStatsJavaSDKSystemPropertyDefaults(defaults)
 
     // Make legacy ice4j properties system properties.
     val cfg = JitsiConfig.SipCommunicatorProps
@@ -233,5 +221,5 @@ private fun startIce4j() {
 
 private fun stopIce4j() {
     // Shut down harvesters.
-    Harvesters.closeStaticConfiguration()
+    Harvesters.close()
 }

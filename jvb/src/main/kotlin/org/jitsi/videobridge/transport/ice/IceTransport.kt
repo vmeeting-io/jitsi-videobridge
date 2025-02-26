@@ -35,9 +35,12 @@ import org.jitsi.utils.logging2.createChildLogger
 import org.jitsi.videobridge.ice.Harvesters
 import org.jitsi.videobridge.ice.IceConfig
 import org.jitsi.videobridge.ice.TransportUtils
+import org.jitsi.videobridge.metrics.VideobridgeMetricsContainer
 import org.jitsi.xmpp.extensions.jingle.CandidatePacketExtension
+import org.jitsi.xmpp.extensions.jingle.IceCandidatePacketExtension
+import org.jitsi.xmpp.extensions.jingle.IceRtcpmuxPacketExtension
 import org.jitsi.xmpp.extensions.jingle.IceUdpTransportPacketExtension
-import org.jitsi.xmpp.extensions.jingle.RtcpmuxPacketExtension
+import org.jitsi.xmpp.util.XmlStringBuilderUtil.Companion.toStringOpt
 import java.beans.PropertyChangeEvent
 import java.beans.PropertyChangeListener
 import java.io.IOException
@@ -46,14 +49,24 @@ import java.net.Inet6Address
 import java.time.Clock
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.LongAdder
 
 class IceTransport @JvmOverloads constructor(
     id: String,
     /**
-     * Whether or not the ICE agent created by this transport should be the
+     * Whether the ICE agent created by this transport should be the
      * 'controlling' role.
      */
     controlling: Boolean,
+    /**
+     * Whether the ICE agent created by this transport should use
+     * unique local ports, rather than the configured port.
+     */
+    useUniquePort: Boolean,
+    /**
+     * Use private addresses for this [IceTransport] even if [IceConfig.advertisePrivateCandidates] is false.
+     */
+    private val advertisePrivateAddresses: Boolean,
     parentLogger: Logger,
     private val clock: Clock = Clock.systemUTC()
 ) {
@@ -85,6 +98,7 @@ class IceTransport @JvmOverloads constructor(
      * Whether or not this [IceTransport] has connected.
      */
     private val iceConnected = AtomicBoolean(false)
+
     /**
      * Whether or not this [IceTransport] has failed to connect.
      */
@@ -104,7 +118,11 @@ class IceTransport @JvmOverloads constructor(
     private val iceStreamPairChangedListener = PropertyChangeListener { ev -> iceStreamPairChanged(ev) }
 
     private val iceAgent = Agent(IceConfig.config.ufragPrefix, logger).apply {
-        appendHarvesters(this)
+        if (useUniquePort) {
+            setUseDynamicPorts(true)
+        } else {
+            appendHarvesters(this)
+        }
         isControlling = controlling
         performConsentFreshness = true
         nominationStrategy = IceConfig.config.nominationStrategy
@@ -120,10 +138,6 @@ class IceTransport @JvmOverloads constructor(
 
     private val iceComponent = iceAgent.createComponent(
         iceStream,
-        Transport.UDP,
-        -1,
-        -1,
-        -1,
         IceConfig.config.keepAliveStrategy,
         IceConfig.config.useComponentSocket
     )
@@ -191,7 +205,7 @@ class IceTransport @JvmOverloads constructor(
             logger.info("Starting the Agent without remote candidates.")
             iceAgent.startConnectivityEstablishment()
         } else {
-            logger.cdebug { "Not starting ICE, no ufrag and pwd yet. ${transportPacketExtension.toXML()}" }
+            logger.cdebug { "Not starting ICE, no ufrag and pwd yet. ${transportPacketExtension.toStringOpt()}" }
         }
     }
 
@@ -213,10 +227,10 @@ class IceTransport @JvmOverloads constructor(
                 logger.warn("Stopping reader", e)
                 break
             }
-            packetStats.numPacketsReceived++
+            packetStats.numPacketsReceived.increment()
             incomingDataHandler?.dataReceived(receiveBuf, packet.offset, packet.length, receivedTime) ?: run {
                 logger.cdebug { "Data handler is null, dropping data" }
-                packetStats.numIncomingPacketsDroppedNoHandler++
+                packetStats.numIncomingPacketsDroppedNoHandler.increment()
             }
         }
         logger.info("No longer running, stopped reading packets")
@@ -229,13 +243,13 @@ class IceTransport @JvmOverloads constructor(
         if (running.get()) {
             try {
                 iceComponent.socket.send(DatagramPacket(data, off, length))
-                packetStats.numPacketsSent++
+                packetStats.numPacketsSent.increment()
             } catch (e: IOException) {
                 logger.error("Error sending packet", e)
                 throw RuntimeException()
             }
         } else {
-            packetStats.numOutgoingPacketsDroppedStopped++
+            packetStats.numOutgoingPacketsDroppedStopped.increment()
         }
     }
 
@@ -267,9 +281,9 @@ class IceTransport @JvmOverloads constructor(
             password = iceAgent.localPassword
             ufrag = iceAgent.localUfrag
             iceComponent.localCandidates?.forEach { cand ->
-                cand.toCandidatePacketExtension()?.let { pe.addChildExtension(it) }
+                cand.toCandidatePacketExtension(advertisePrivateAddresses)?.let { pe.addChildExtension(it) }
             }
-            addChildExtension(RtcpmuxPacketExtension())
+            addChildExtension(IceRtcpmuxPacketExtension())
         }
     }
 
@@ -277,10 +291,7 @@ class IceTransport @JvmOverloads constructor(
      * @return the number of network reachable remote candidates contained in
      * the given list of candidates.
      */
-    private fun addRemoteCandidates(
-        remoteCandidates: List<CandidatePacketExtension>,
-        iceAgentIsRunning: Boolean
-    ): Int {
+    private fun addRemoteCandidates(remoteCandidates: List<CandidatePacketExtension>, iceAgentIsRunning: Boolean): Int {
         var remoteCandidateCount = 0
         // Sort the remote candidates (host < reflexive < relayed) in order to
         // create first the host, then the reflexive, the relayed candidates and
@@ -337,11 +348,21 @@ class IceTransport @JvmOverloads constructor(
             transition.completed() -> {
                 if (iceConnected.compareAndSet(false, true)) {
                     eventHandler?.connected()
+                    if (iceComponent.selectedPair.remoteCandidate.transport.isTcpType()) {
+                        iceSucceededTcp.inc()
+                    }
+                    if (iceComponent.selectedPair.remoteCandidate.type == CandidateType.RELAYED_CANDIDATE ||
+                        iceComponent.selectedPair.localCandidate.type == CandidateType.RELAYED_CANDIDATE
+                    ) {
+                        iceSucceededRelayed.inc()
+                    }
+                    iceSucceeded.inc()
                 }
             }
             transition.failed() -> {
                 if (iceFailed.compareAndSet(false, true)) {
                     eventHandler?.failed()
+                    Companion.iceFailed.inc()
                 }
             }
         }
@@ -372,25 +393,59 @@ class IceTransport @JvmOverloads constructor(
 
     companion object {
         fun appendHarvesters(iceAgent: Agent) {
-            Harvesters.initializeStaticConfiguration()
-            Harvesters.tcpHarvester?.let {
+            Harvesters.INSTANCE.tcpHarvester?.let {
                 iceAgent.addCandidateHarvester(it)
             }
-            Harvesters.singlePortHarvesters?.forEach(iceAgent::addCandidateHarvester)
+            Harvesters.INSTANCE.singlePortHarvesters.forEach(iceAgent::addCandidateHarvester)
         }
+
+        /**
+         * The total number of times an ICE Agent failed to establish
+         * connectivity.
+         */
+        val iceFailed = VideobridgeMetricsContainer.instance.registerCounter(
+            "ice_failed",
+            "Number of times an ICE Agent failed to establish connectivity."
+        )
+
+        /**
+         * The total number of times an ICE Agent succeeded.
+         */
+        val iceSucceeded = VideobridgeMetricsContainer.instance.registerCounter(
+            "ice_succeeded",
+            "Number of times an ICE Agent succeeded."
+        )
+
+        /**
+         * The total number of times an ICE Agent succeeded and the selected
+         * candidate was a TCP candidate.
+         */
+        val iceSucceededTcp = VideobridgeMetricsContainer.instance.registerCounter(
+            "ice_succeeded_tcp",
+            "Number of times an ICE Agent succeeded and the selected candidate was a TCP candidate."
+        )
+
+        /**
+         * The total number of times an ICE Agent succeeded and the selected
+         * candidate pair included a relayed candidate.
+         */
+        val iceSucceededRelayed = VideobridgeMetricsContainer.instance.registerCounter(
+            "ice_succeeded_relayed",
+            "Number of times an ICE Agent succeeded and the selected pair included a relayed candidate."
+        )
     }
 
-    private data class PacketStats(
-        var numPacketsReceived: Int = 0,
-        var numIncomingPacketsDroppedNoHandler: Int = 0,
-        var numPacketsSent: Int = 0,
-        var numOutgoingPacketsDroppedStopped: Int = 0
-    ) {
+    private class PacketStats {
+        val numPacketsReceived = LongAdder()
+        val numIncomingPacketsDroppedNoHandler = LongAdder()
+        val numPacketsSent = LongAdder()
+        val numOutgoingPacketsDroppedStopped = LongAdder()
+
         fun toJson(): OrderedJsonObject = OrderedJsonObject().apply {
-            put("num_packets_received", numPacketsReceived)
-            put("num_incoming_packets_dropped_no_handler", numIncomingPacketsDroppedNoHandler)
-            put("num_packets_sent", numPacketsSent)
-            put("num_outgoing_packets_dropped_stopped", numOutgoingPacketsDroppedStopped)
+            put("num_packets_received", numPacketsReceived.sum())
+            put("num_incoming_packets_dropped_no_handler", numIncomingPacketsDroppedNoHandler.sum())
+            put("num_packets_sent", numPacketsSent.sum())
+            put("num_outgoing_packets_dropped_stopped", numOutgoingPacketsDroppedStopped.sum())
         }
     }
 
@@ -407,10 +462,12 @@ class IceTransport @JvmOverloads constructor(
          * Notify the event handler that ICE connected successfully
          */
         fun connected()
+
         /**
          * Notify the event handler that ICE failed to connect
          */
         fun failed()
+
         /**
          * Notify the event handler that ICE consent was updated
          */
@@ -437,14 +494,13 @@ private data class IceProcessingStateTransition(
     }
 }
 
-private fun IceMediaStream.remoteUfragAndPasswordKnown(): Boolean =
-    remoteUfrag != null && remotePassword != null
+private fun IceMediaStream.remoteUfragAndPasswordKnown(): Boolean = remoteUfrag != null && remotePassword != null
 
-private fun CandidatePacketExtension.ipNeedsResolution(): Boolean =
-    !InetAddresses.isInetAddress(ip)
+private fun CandidatePacketExtension.ipNeedsResolution(): Boolean = !InetAddresses.isInetAddress(ip)
 
 private fun TransportAddress.isPrivateAddress(): Boolean = address.isSiteLocalAddress ||
-    /* 0xfc00::/7 */ ((address is Inet6Address) && ((addressBytes[0].toInt() and 0xfe) == 0xfc))
+    /* 0xfc00::/7 */
+    ((address is Inet6Address) && ((addressBytes[0].toInt() and 0xfe) == 0xfc))
 
 private fun Transport.isTcpType(): Boolean = this == Transport.TCP || this == Transport.SSLTCP
 
@@ -455,11 +511,14 @@ private fun generateCandidateId(candidate: LocalCandidate): String = buildString
     append(java.lang.Long.toHexString(candidate.hashCode().toLong()))
 }
 
-private fun LocalCandidate.toCandidatePacketExtension(): CandidatePacketExtension? {
-    if (!IceConfig.config.advertisePrivateCandidates && transportAddress.isPrivateAddress()) {
+private fun LocalCandidate.toCandidatePacketExtension(advertisePrivateAddresses: Boolean): CandidatePacketExtension? {
+    if (transportAddress.isPrivateAddress() &&
+        !advertisePrivateAddresses &&
+        !IceConfig.config.advertisePrivateCandidates
+    ) {
         return null
     }
-    val cpe = CandidatePacketExtension()
+    val cpe = IceCandidatePacketExtension()
     cpe.component = parentComponent.componentID
     cpe.foundation = foundation
     cpe.generation = parentComponent.parentStream.parentAgent.generation
@@ -482,7 +541,10 @@ private fun LocalCandidate.toCandidatePacketExtension(): CandidatePacketExtensio
     cpe.port = transportAddress.port
 
     relatedAddress?.let {
-        if (IceConfig.config.advertisePrivateCandidates || !it.isPrivateAddress()) {
+        if (!IceConfig.config.advertisePrivateCandidates && it.isPrivateAddress()) {
+            cpe.relAddr = "0.0.0.0"
+            cpe.relPort = 9
+        } else {
             cpe.relAddr = it.hostAddress
             cpe.relPort = it.port
         }

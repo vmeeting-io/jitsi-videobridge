@@ -17,47 +17,72 @@ package org.jitsi.videobridge
 
 import io.kotest.core.spec.IsolationMode
 import io.kotest.core.spec.style.ShouldSpec
+import io.kotest.core.test.TestCase
+import io.kotest.core.test.TestResult
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.mockk
 import io.mockk.verify
+import org.jitsi.config.withNewConfig
 import org.jitsi.shutdown.ShutdownServiceImpl
 import org.jitsi.utils.OrderedJsonObject
-import org.jivesoftware.smack.packet.ErrorIQ
-import org.jivesoftware.smack.packet.StanzaError
+import org.jitsi.utils.concurrent.FakeScheduledExecutorService
+import org.jitsi.videobridge.shutdown.ShutdownConfig
+import org.jitsi.videobridge.shutdown.ShutdownState
+import org.jitsi.videobridge.util.TaskPools
 import org.json.simple.parser.JSONParser
-import org.jxmpp.jid.impl.JidCreate
 
 class VideobridgeTest : ShouldSpec() {
-    override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
+    override fun isolationMode(): IsolationMode = IsolationMode.InstancePerLeaf
 
     private val shutdownService: ShutdownServiceImpl = mockk(relaxed = true)
-    private val videobridge = Videobridge(null, shutdownService, mockk())
+    private val fakeExecutor = FakeScheduledExecutorService()
+    private val videobridge = Videobridge(null, shutdownService, mockk(), null, fakeExecutor.clock)
+
+    override suspend fun beforeAny(testCase: TestCase) = super.beforeAny(testCase).also {
+        TaskPools.SCHEDULED_POOL = fakeExecutor
+    }
+
+    override suspend fun afterAny(testCase: TestCase, result: TestResult) = super.afterAny(testCase, result).also {
+        TaskPools.resetScheduledPool()
+        // we need this to test shutdown behavior since metrics are preserved across tests
+        videobridge.statistics.currentLocalEndpoints.set(0)
+    }
+
     init {
         context("Debug state should be JSON") {
             videobridge.getDebugState(null, null, true).shouldBeValidJson()
         }
         context("Shutdown") {
             context("when a conference is active") {
-                val conf = videobridge.createConference(JidCreate.entityBareFrom("conf@domain.org"))
-                context("starting a graceful shutdown") {
-                    videobridge.shutdown(true)
-                    should("report that shutdown is in progress") {
-                        videobridge.isShutdownInProgress shouldBe true
-                    }
-                    should("not have started the shutdown yet") {
-                        verify(exactly = 0) { shutdownService.beginShutdown() }
-                    }
-                    should("respond with an error if a new conference create is received via XMPP") {
-                        val confCreateIq = ColibriUtilities.createConferenceIq(JidCreate.from("focusJid"))
-                        val resp = videobridge.handleColibriConferenceIQ(confCreateIq)
-                        resp.shouldBeInstanceOf<ErrorIQ>()
-                        resp.error.condition shouldBe StanzaError.Condition.service_unavailable
-                    }
-                    context("and once the conference expires") {
-                        videobridge.expireConference(conf)
-                        should("start the shutdown") {
+                withNewConfig("videobridge.shutdown.graceful-shutdown-min-participants=10") {
+                    repeat(15) { videobridge.localEndpointCreated(false) }
+                    context("starting a graceful shutdown") {
+                        videobridge.shutdown(true)
+                        should("report that shutdown is in progress") {
+                            videobridge.isInGracefulShutdown shouldBe true
+                            videobridge.shutdownState shouldBe ShutdownState.GRACEFUL_SHUTDOWN
+                        }
+                        should("not have started the shutdown yet") {
+                            verify(exactly = 0) { shutdownService.beginShutdown() }
+                        }
+                        context("When the number of participants drops below the threshold") {
+                            repeat(10) { videobridge.localEndpointExpired(false) }
+                            videobridge.shutdownState shouldBe ShutdownState.SHUTTING_DOWN
+                            fakeExecutor.clock.elapse(ShutdownConfig.config.shuttingDownDelay)
+                            fakeExecutor.run()
                             verify(exactly = 1) { shutdownService.beginShutdown() }
+                        }
+                        context("When the graceful shutdown period expires") {
+                            fakeExecutor.clock.elapse(ShutdownConfig.config.gracefulShutdownMaxDuration)
+                            fakeExecutor.run()
+                            should("go to SHUTTING_DOWN") {
+                                videobridge.shutdownState shouldBe ShutdownState.SHUTTING_DOWN
+                            }
+                            should("and then shut down after shuttingDownDelay") {
+                                fakeExecutor.clock.elapse(ShutdownConfig.config.shuttingDownDelay)
+                                fakeExecutor.run()
+                                verify(exactly = 1) { shutdownService.beginShutdown() }
+                            }
                         }
                     }
                 }

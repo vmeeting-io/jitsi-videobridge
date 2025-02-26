@@ -15,12 +15,14 @@
  */
 package org.jitsi.videobridge;
 
+import org.eclipse.jetty.websocket.api.*;
+import org.eclipse.jetty.websocket.core.CloseStatus;
 import org.jetbrains.annotations.*;
 import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.datachannel.*;
 import org.jitsi.videobridge.datachannel.protocol.*;
 import org.jitsi.videobridge.message.*;
-import org.jitsi.videobridge.octo.*;
+import org.jitsi.videobridge.relay.*;
 import org.jitsi.videobridge.websocket.*;
 import org.json.simple.*;
 
@@ -31,8 +33,8 @@ import java.util.concurrent.atomic.*;
 import java.util.function.*;
 import java.util.stream.*;
 
-import static org.apache.commons.lang3.StringUtils.isBlank;
-import static org.jitsi.videobridge.EndpointMessageTransportConfig.config;
+import static org.jitsi.videobridge.VersionConfig.config;
+import static org.jitsi.videobridge.util.MultiStreamCompatibilityKt.endpointIdToSourceName;
 
 /**
  * Handles the functionality related to sending and receiving COLIBRI messages
@@ -42,7 +44,7 @@ import static org.jitsi.videobridge.EndpointMessageTransportConfig.config;
  * @author Boris Grozev
  */
 public class EndpointMessageTransport
-    extends AbstractEndpointMessageTransport<Endpoint>
+    extends AbstractEndpointMessageTransport
     implements DataChannelStack.DataChannelMessageListener,
         ColibriWebSocket.EventHandler
 {
@@ -127,28 +129,46 @@ public class EndpointMessageTransport
     @Override
     public BridgeChannelMessage videoType(VideoTypeMessage videoTypeMessage)
     {
-        endpoint.setVideoType(videoTypeMessage.getVideoType());
+        return sourceVideoType(
+                new SourceVideoTypeMessage(
+                        videoTypeMessage.getVideoType(),
+                        endpointIdToSourceName(endpoint.getId()),
+                        videoTypeMessage.getEndpointId())
+        );
+    }
+
+    @Override
+    public BridgeChannelMessage sourceVideoType(SourceVideoTypeMessage sourceVideoTypeMessage)
+    {
+        String sourceName = sourceVideoTypeMessage.getSourceName();
+
+        if (getLogger().isDebugEnabled())
+        {
+            getLogger().debug("Received video type of " + sourceName +": " + sourceVideoTypeMessage.getVideoType());
+        }
+
+        endpoint.setVideoType(sourceName, sourceVideoTypeMessage.getVideoType());
 
         Conference conference = endpoint.getConference();
 
-        if (conference == null || conference.isExpired())
+        if (conference.isExpired())
         {
-            getLogger().warn("Unable to forward VideoTypeMessage, conference is null or expired");
+            getLogger().warn("Unable to forward SourceVideoTypeMessage, conference is expired");
             return null;
         }
 
-        videoTypeMessage.setEndpointId(endpoint.getId());
+        sourceVideoTypeMessage.setEndpointId(endpoint.getId());
 
-        /* Forward videoType messages to Octo. */
-        conference.sendMessage(videoTypeMessage, Collections.emptyList(), true);
+        /* Forward videoType messages to Relays. */
+        conference.sendMessage(sourceVideoTypeMessage, Collections.emptyList(), true);
 
         return null;
     }
 
     @Override
-    public void unhandledMessage(BridgeChannelMessage message)
+    public void unhandledMessage(@NotNull BridgeChannelMessage message)
     {
-        getLogger().warn("Received a message with an unexpected type: " + message.getType());
+        getLogger().warn("Received a message with an unexpected type: " + message.getClass().getSimpleName());
     }
 
     /**
@@ -182,7 +202,7 @@ public class EndpointMessageTransport
     private void sendMessage(DataChannel dst, BridgeChannelMessage message)
     {
         dst.sendString(message.toJson());
-        statisticsSupplier.get().totalDataChannelMessagesSent.incrementAndGet();
+        statisticsSupplier.get().dataChannelMessagesSent.inc();
     }
 
     /**
@@ -192,18 +212,15 @@ public class EndpointMessageTransport
      */
     private void sendMessage(ColibriWebSocket dst, BridgeChannelMessage message)
     {
-        // We'll use the async version of sendString since this may be called
-        // from multiple threads.  It's just fire-and-forget though, so we
-        // don't wait on the result
-        dst.getRemote().sendStringByFuture(message.toJson());
-        statisticsSupplier.get().totalColibriWebSocketMessagesSent.incrementAndGet();
+        dst.sendString(message.toJson());
+        statisticsSupplier.get().colibriWebSocketMessagesSent.inc();
     }
 
     @Override
     public void onDataChannelMessage(DataChannelMessage dataChannelMessage)
     {
         webSocketLastActive = false;
-        statisticsSupplier.get().totalDataChannelMessagesReceived.incrementAndGet();
+        statisticsSupplier.get().dataChannelMessagesReceived.inc();
 
         if (dataChannelMessage instanceof DataChannelStringMessage)
         {
@@ -297,7 +314,11 @@ public class EndpointMessageTransport
             // If we already have a web-socket, discard it and use the new one.
             if (webSocket != null)
             {
-                webSocket.getSession().close(200, "replaced");
+                Session session = webSocket.getSession();
+                if (session != null)
+                {
+                    session.close(CloseStatus.NORMAL, "replaced");
+                }
             }
 
             webSocket = ws;
@@ -339,7 +360,7 @@ public class EndpointMessageTransport
             {
                 webSocket = null;
                 webSocketLastActive = false;
-                getLogger().debug(() -> "Web socket closed, statusCode " + statusCode + " ( " + reason + ").");
+                getLogger().info(() -> "Websocket closed, statusCode " + statusCode + " ( " + reason + ").");
             }
         }
 
@@ -349,15 +370,24 @@ public class EndpointMessageTransport
      * {@inheritDoc}
      */
     @Override
-    protected void close()
+    public void webSocketError(ColibriWebSocket ws, Throwable cause)
+    {
+        getLogger().error("Colibri websocket error: " +  cause.getMessage());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
     {
         synchronized (webSocketSyncRoot)
         {
             if (webSocket != null)
             {
-                // 410 Gone indicates that the resource requested is no longer
-                // available and will not be available again.
-                webSocket.getSession().close(410, "replaced");
+                //  1001 indicates that an endpoint is "going away", such as a server
+                //  going down or a browser having navigated away from a page.
+                webSocket.getSession().close(CloseStatus.SHUTDOWN, "endpoint closed");
                 webSocket = null;
                 getLogger().debug(() -> "Endpoint expired, closed colibri web-socket.");
             }
@@ -376,7 +406,7 @@ public class EndpointMessageTransport
             return;
         }
 
-        statisticsSupplier.get().totalColibriWebSocketMessagesReceived.incrementAndGet();
+        statisticsSupplier.get().colibriWebSocketMessagesReceived.inc();
 
         webSocketLastActive = true;
         onMessage(ws, message);
@@ -428,64 +458,11 @@ public class EndpointMessageTransport
         return debugState;
     }
 
-    /**
-     * Notifies this {@code Endpoint} that a {@link SelectedEndpointsMessage}
-     * has been received.
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage selectedEndpoint(SelectedEndpointMessage message)
-    {
-        String newSelectedEndpointID = message.getSelectedEndpoint();
-
-        List<String> newSelectedIDs =
-                isBlank(newSelectedEndpointID) ?
-                        Collections.emptyList() :
-                        Collections.singletonList(newSelectedEndpointID);
-
-        selectedEndpoints(new SelectedEndpointsMessage(newSelectedIDs));
-        return null;
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@link SelectedEndpointsMessage}
-     * has been received.
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage selectedEndpoints(SelectedEndpointsMessage message)
-    {
-        List<String> newSelectedEndpoints = new ArrayList<>(message.getSelectedEndpoints());
-
-        getLogger().debug(() -> "Selected " + newSelectedEndpoints);
-        endpoint.setSelectedEndpoints(newSelectedEndpoints);
-        return null;
-    }
-
     @Nullable
     @Override
     public BridgeChannelMessage receiverVideoConstraints(@NotNull ReceiverVideoConstraintsMessage message)
     {
         endpoint.setBandwidthAllocationSettings(message);
-        return null;
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a
-     * {@link ReceiverVideoConstraintMessage} has been received
-     *
-     * @param message the message that was received.
-     */
-    @Override
-    public BridgeChannelMessage receiverVideoConstraint(ReceiverVideoConstraintMessage message)
-    {
-        int maxFrameHeight = message.getMaxFrameHeight();
-        getLogger().debug(
-                () -> "Received a maxFrameHeight video constraint from " + endpoint.getId() + ": " + maxFrameHeight);
-
-        endpoint.setMaxFrameHeight(maxFrameHeight);
         return null;
     }
 
@@ -512,6 +489,12 @@ public class EndpointMessageTransport
     @Override
     public BridgeChannelMessage endpointMessage(EndpointMessage message)
     {
+        if (endpoint.getVisitor())
+        {
+            getLogger().warn("Not forwarding endpoint message from visitor endpoint");
+            return null;
+        }
+
         // First insert/overwrite the "from" to prevent spoofing.
         String from = endpoint.getId();
         message.setFrom(from);
@@ -524,15 +507,12 @@ public class EndpointMessageTransport
             return null;
         }
 
-        boolean sendToOcto;
-
-        List<AbstractEndpoint> targets;
         if (message.isBroadcast())
         {
-            // Broadcast message to all local endpoints + octo.
-            targets = new LinkedList<>(conference.getLocalEndpoints());
+            // Broadcast message to all local endpoints and relays.
+            List<Endpoint> targets = new LinkedList<>(conference.getLocalEndpoints());
             targets.remove(endpoint);
-            sendToOcto = true;
+            conference.sendMessage(message, targets, /* sendToRelays */ true);
         }
         else
         {
@@ -540,49 +520,55 @@ public class EndpointMessageTransport
             String to = message.getTo();
 
             AbstractEndpoint targetEndpoint = conference.getEndpoint(to);
-            if (targetEndpoint instanceof OctoEndpoint)
+            if (targetEndpoint instanceof Endpoint)
             {
-                targets = Collections.emptyList();
-                sendToOcto = true;
+                ((Endpoint)targetEndpoint).sendMessage(message);
+            }
+            else if (targetEndpoint instanceof RelayedEndpoint)
+            {
+                ((RelayedEndpoint)targetEndpoint).getRelay().sendMessage(message);
             }
             else if (targetEndpoint != null)
             {
-                targets = Collections.singletonList(targetEndpoint);
-                sendToOcto = false;
+                conference.sendMessage(message, Collections.emptyList(), /* sendToRelays */ true);
             }
             else
             {
                 getLogger().warn("Unable to find endpoint to send EndpointMessage to: " + to);
-                return null;
             }
         }
 
-        conference.sendMessage(message, targets, sendToOcto);
         return null;
     }
 
     /**
      * Handles an endpoint statistics message from this {@code Endpoint} that should be forwarded to
-     * other endpoints as appropriate, and also to Octo.
+     * other endpoints as appropriate, and also to relays.
      *
      * @param message the message that was received from the endpoint.
      */
     @Override
     public BridgeChannelMessage endpointStats(@NotNull EndpointStats message)
     {
+        if (endpoint.getVisitor())
+        {
+            getLogger().warn("Not forwarding endpoint stats from visitor endpoint");
+            return null;
+        }
+
         // First insert/overwrite the "from" to prevent spoofing.
         String from = endpoint.getId();
         message.setFrom(from);
 
         Conference conference = endpoint.getConference();
 
-        if (conference == null || conference.isExpired())
+        if (conference.isExpired())
         {
             getLogger().warn("Unable to send EndpointStats, conference is null or expired");
             return null;
         }
 
-        List<AbstractEndpoint> targets = conference.getLocalEndpoints().stream()
+        List<Endpoint> targets = conference.getLocalEndpoints().stream()
             .filter((ep) -> ep != endpoint && ep.wantsStatsFrom(endpoint))
             .collect(Collectors.toList());
 

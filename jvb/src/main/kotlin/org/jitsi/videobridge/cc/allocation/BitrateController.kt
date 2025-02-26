@@ -25,10 +25,10 @@ import org.jitsi.utils.event.SyncEventEmitter
 import org.jitsi.utils.logging.DiagnosticContext
 import org.jitsi.utils.logging.TimeSeriesLogger
 import org.jitsi.utils.logging2.Logger
-import org.jitsi.videobridge.cc.config.BitrateControllerConfig
+import org.jitsi.utils.secs
+import org.jitsi.videobridge.cc.config.BitrateControllerConfig.Companion.config
 import org.jitsi.videobridge.message.ReceiverVideoConstraintsMessage
 import org.jitsi.videobridge.util.BooleanStateTimeTracker
-import org.jitsi.videobridge.util.VideoType
 import org.json.simple.JSONObject
 import java.time.Clock
 import java.time.Duration
@@ -39,9 +39,8 @@ import java.util.function.Supplier
  * 1. Decide how to allocate the available bandwidth between the available streams.
  * 2. Implement the allocation via a packet handling interface.
  *
- * Historically both were implemented in a single class, but they are now split between [BandwidthAllocator] (for
- * the allocation) and [BitrateControllerPacketHandler] (for packet handling). This class was introduced as a
- * lightweight shim in order to preserve the previous API.
+ * Historically both were implemented in a single class, but they are now split between [BandwidthAllocator] and
+ * [PacketHandler]. This class was introduced as a lightweight shim in order to preserve the previous API.
  *
  */
 class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
@@ -54,10 +53,12 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
     val eventEmitter = SyncEventEmitter<EventHandler>()
 
     private val bitrateAllocatorEventHandler = BitrateAllocatorEventHandler()
+
     /**
-     * Keep track of the "forwarded" endpoints, i.e. the endpoints for which we are forwarding *some* layer.
+     * Keep track of the "forwarded" sources, i.e. the media sources for which we are forwarding *some* layer.
      */
-    private var forwardedEndpoints: Set<String> = emptySet()
+    var forwardedSources: Set<String> = emptySet()
+        private set
 
     /**
      * Keep track of how much time we spend knowingly oversending (due to enableOnstageVideoSuspend being false)
@@ -78,8 +79,7 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
      */
     private var supportsRtx = false
 
-    private val packetHandler: BitrateControllerPacketHandler =
-        BitrateControllerPacketHandler(clock, parentLogger, diagnosticContext, eventEmitter)
+    private val packetHandler: PacketHandler = PacketHandler(clock, parentLogger, diagnosticContext, eventEmitter)
     private val bandwidthAllocator: BandwidthAllocator<T> =
         BandwidthAllocator(
             bitrateAllocatorEventHandler,
@@ -89,8 +89,9 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
             diagnosticContext,
             clock
         )
+    fun hasSuspendedSources() = bandwidthAllocator.allocation.hasSuspendedSources
 
-    private val allocationSettingsWrapper = AllocationSettingsWrapper()
+    private val allocationSettingsWrapper = AllocationSettingsWrapper(parentLogger)
     val allocationSettings
         get() = allocationSettingsWrapper.get()
 
@@ -104,7 +105,7 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
      * TODO: Is this comment still accurate?
      */
     private val trustBwe: Boolean
-        get() = BitrateControllerConfig.trustBwe() && supportsRtx && packetHandler.timeSinceFirstMedia() >= 10000
+        get() = config.trustBwe() && supportsRtx && packetHandler.timeSinceFirstMedia() >= 10.secs
 
     // Proxy to the allocator
     fun endpointOrderingChanged() = bandwidthAllocator.update()
@@ -116,21 +117,10 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
             }
         }
 
-    fun setMaxFrameHeight(maxFrameHeight: Int) {
-        if (allocationSettingsWrapper.setMaxFrameHeight(maxFrameHeight)) {
-            bandwidthAllocator.update(allocationSettingsWrapper.get())
-        }
-    }
-    fun setSelectedEndpoints(selectedEndpoints: List<String>) {
-        if (allocationSettingsWrapper.setSelectedEndpoints(selectedEndpoints)) {
-            bandwidthAllocator.update(allocationSettingsWrapper.get())
-        }
-    }
+    fun expire() = bandwidthAllocator.expire()
 
-    /**
-     * Return the number of endpoints whose streams are currently being forwarded.
-     */
-    fun numForwardedEndpoints(): Int = forwardedEndpoints.size
+    /** Return the number of sources currently being forwarded. */
+    fun numForwardedSources(): Int = forwardedSources.size
     fun getTotalOversendingTime(): Duration = oversendingTimeTracker.totalTimeOn()
     fun isOversending() = oversendingTimeTracker.state
     fun bandwidthChanged(newBandwidthBps: Long) {
@@ -146,20 +136,15 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
         }
         return packetHandler.accept(packetInfo)
     }
-    fun accept(rtcpSrPacket: RtcpSrPacket): Boolean {
-        // TODO: It is not clear why this is here, and why it isn't in the other accept() method.
-        bandwidthAllocator.maybeUpdate()
-
-        return packetHandler.accept(rtcpSrPacket)
-    }
-    fun transformRtcp(rtcpSrPacket: RtcpSrPacket?): Boolean = packetHandler.transformRtcp(rtcpSrPacket)
+    fun accept(rtcpSrPacket: RtcpSrPacket): Boolean = packetHandler.accept(rtcpSrPacket)
+    fun transformRtcp(rtcpSrPacket: RtcpSrPacket): Boolean = packetHandler.transformRtcp(rtcpSrPacket)
     fun transformRtp(packetInfo: PacketInfo): Boolean = packetHandler.transformRtp(packetInfo)
 
     val debugState: JSONObject
         get() = JSONObject().apply {
             put("bitrate_allocator", bandwidthAllocator.debugState)
             put("packet_handler", packetHandler.debugState)
-            put("forwardedEndpoints", forwardedEndpoints.toString())
+            put("forwardedSources", forwardedSources.toString())
             put("oversending", oversendingTimeTracker.state)
             put("total_oversending_time_secs", oversendingTimeTracker.totalTimeOn().seconds)
             put("supportsRtx", supportsRtx)
@@ -167,8 +152,6 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
         }
 
     fun addPayloadType(payloadType: PayloadType) {
-        packetHandler.addPayloadType(payloadType)
-
         if (payloadType.encoding == PayloadTypeEncoding.RTX) {
             supportsRtx = true
         }
@@ -181,23 +164,17 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
     }
 
     /**
-     * Query whether this endpoint is on stage or selected, as of the most recent
-     * video constraints.
+     * Query whether this source is on stage or selected, as of the most recent
+     * video constraints
      */
-    fun isOnStageOrSelected(endpoint: T) =
-        allocationSettings.onStageEndpoints.contains(endpoint.id) ||
-            allocationSettings.selectedEndpoints.contains(endpoint.id)
+    fun isOnStageOrSelected(source: MediaSourceDesc) = allocationSettings.onStageSources.contains(source.sourceName) ||
+        allocationSettings.selectedSources.contains(source.sourceName)
 
     /**
-     * Query whether this allocator is forwarding a source from a given endpoint, as of its
-     * most recent allocation decision.
+     * Query whether this allocator has non-zero effective constraints for a given source
      */
-    fun isForwarding(endpoint: T) = bandwidthAllocator.isForwarding(endpoint.id)
-
-    /**
-     * Query whether this allocator has non-zero effective constraints for a given endpoint.
-     */
-    fun hasNonZeroEffectiveConstraints(endpoint: T) = bandwidthAllocator.hasNonZeroEffectiveConstraints(endpoint.id)
+    fun hasNonZeroEffectiveConstraints(source: MediaSourceDesc) =
+        bandwidthAllocator.hasNonZeroEffectiveConstraints(source)
 
     /**
      * Get the target and ideal bitrate of the current [BandwidthAllocation], as well as the list of SSRCs being
@@ -267,12 +244,13 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
     }
 
     interface EventHandler {
-        fun forwardedEndpointsChanged(forwardedEndpoints: Set<String>)
+        fun forwardedSourcesChanged(forwardedSources: Set<String>)
         fun effectiveVideoConstraintsChanged(
-            oldEffectiveConstraints: Map<String, VideoConstraints>,
-            newEffectiveConstraints: Map<String, VideoConstraints>
+            oldEffectiveConstraints: EffectiveConstraintsMap,
+            newEffectiveConstraints: EffectiveConstraintsMap,
         )
         fun keyframeNeeded(endpointId: String?, ssrc: Long)
+
         /**
          * This is meant to be internal to BitrateAllocator, but is exposed here temporarily for the purposes of testing.
          */
@@ -285,11 +263,10 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
             // Actually implement the allocation (configure the packet filter to forward the chosen target layers).
             packetHandler.allocationChanged(allocation)
 
-            // TODO(george) bring back sending this message on message transport  connect
-            val newForwardedEndpoints = allocation.forwardedEndpoints
-            if (forwardedEndpoints != newForwardedEndpoints) {
-                forwardedEndpoints = newForwardedEndpoints
-                eventEmitter.fireEvent { forwardedEndpointsChanged(newForwardedEndpoints) }
+            val newForwardedSources = allocation.forwardedSources
+            if (forwardedSources != newForwardedSources) {
+                forwardedSources = newForwardedSources
+                eventEmitter.fireEvent { forwardedSourcesChanged(newForwardedSources) }
             }
 
             oversendingTimeTracker.setState(allocation.oversending)
@@ -299,8 +276,8 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
         }
 
         override fun effectiveVideoConstraintsChanged(
-            oldEffectiveConstraints: Map<String, VideoConstraints>,
-            newEffectiveConstraints: Map<String, VideoConstraints>
+            oldEffectiveConstraints: EffectiveConstraintsMap,
+            newEffectiveConstraints: EffectiveConstraintsMap
         ) {
             // Forward to the outer EventHandler.
             eventEmitter.fireEvent {
@@ -311,12 +288,11 @@ class BitrateController<T : MediaSourceContainer> @JvmOverloads constructor(
 }
 
 /**
- * Abstracts a source endpoint for the purposes of [BandwidthAllocator].
+ * Abstracts a media source for the purposes of [BandwidthAllocator].
  */
 interface MediaSourceContainer {
     val id: String
-    val videoType: VideoType
-    val mediaSource: MediaSourceDesc?
+    val mediaSources: Array<MediaSourceDesc>
 }
 
 data class BitrateControllerStatusSnapshot(

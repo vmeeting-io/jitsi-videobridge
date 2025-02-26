@@ -16,9 +16,10 @@
 package org.jitsi.videobridge.stats;
 
 import org.jitsi.utils.logging2.*;
-import org.jitsi.videobridge.signaling.api.*;
 import org.jitsi.videobridge.xmpp.*;
+import org.jitsi.videobridge.xmpp.config.*;
 import org.jitsi.xmpp.extensions.colibri.*;
+import java.util.List;
 
 /**
  * Implements a {@link StatsTransport} which publishes via Presence in an XMPP MUC.
@@ -49,14 +50,17 @@ public class MucStatsTransport
     {
         logger.debug(() -> "Publishing statistics through MUC: " + stats);
 
-        ColibriStatsExtension statsExt = Statistics.toXmppExtensionElement(stats);
+        ColibriStatsExtension statsExt;
 
-        if (JvbApiConfig.enabled())
+        if (XmppClientConnectionConfig.config.getStatsFilterEnabled())
         {
-//                statsExt.addStat(
-//                    "jvb-api-version",
-//                    SupportedApiVersionsKt.toPresenceString(ApplicationKt.SUPPORTED_API_VERSIONS)
-//                );
+            List<String> whitelist = XmppClientConnectionConfig.config.getStatsWhitelist();
+            logger.debug(() -> "Statistics filter applied: " + whitelist);
+            statsExt = Statistics.toXmppExtensionElementFiltered(stats, whitelist);
+        }
+        else
+        {
+            statsExt = Statistics.toXmppExtensionElement(stats);
         }
 
         xmppConnection.setPresenceExtension(statsExt);

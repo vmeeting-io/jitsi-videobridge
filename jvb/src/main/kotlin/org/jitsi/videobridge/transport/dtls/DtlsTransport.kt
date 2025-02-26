@@ -43,10 +43,13 @@ class DtlsTransport(parentLogger: Logger) {
     private val logger = createChildLogger(parentLogger)
 
     private val running = AtomicBoolean(true)
+
     @JvmField
     var incomingDataHandler: IncomingDataHandler? = null
+
     @JvmField
     var outgoingDataHandler: OutgoingDataHandler? = null
+
     @JvmField
     var eventHandler: EventHandler? = null
     private var dtlsHandshakeComplete = false
@@ -55,6 +58,9 @@ class DtlsTransport(parentLogger: Logger) {
         get() = dtlsHandshakeComplete
 
     private val stats = Stats()
+
+    /** Whether to advertise cryptex to peers. */
+    var cryptex = false
 
     /**
      * The DTLS stack instance
@@ -99,7 +105,7 @@ class DtlsTransport(parentLogger: Logger) {
      * (via [setSetupAttribute]
      */
     fun startDtlsHandshake() {
-        logger.info("Starting DTLS handshake")
+        logger.info("Starting DTLS handshake, role=${dtlsStack.role}")
         if (dtlsStack.role == null) {
             logger.warn("Starting the DTLS stack before it knows its role")
         }
@@ -115,7 +121,7 @@ class DtlsTransport(parentLogger: Logger) {
         if (setupAttr.isNullOrEmpty()) {
             return
         }
-        when (setupAttr.toLowerCase()) {
+        when (setupAttr.lowercase()) {
             "active" -> {
                 logger.info("The remote side is acting as DTLS client, we'll act as server")
                 dtlsStack.actAsServer()
@@ -141,14 +147,6 @@ class DtlsTransport(parentLogger: Logger) {
         }
 
         dtlsStack.remoteFingerprints = remoteFingerprints
-        val hasSha1Hash = remoteFingerprints.keys.any { it.equals("sha-1", ignoreCase = true) }
-        if (dtlsStack.role == null && hasSha1Hash) {
-            // hack(george) Jigasi sends a sha-1 dtls fingerprint without a
-            // setup attribute and it assumes a server role for the bridge.
-
-            logger.info("Assume that the remote side is Jigasi, we'll act as server")
-            dtlsStack.actAsServer()
-        }
     }
 
     /**
@@ -167,19 +165,20 @@ class DtlsTransport(parentLogger: Logger) {
         }
         fingerprintPE.fingerprint = dtlsStack.localFingerprint
         fingerprintPE.hash = dtlsStack.localFingerprintHashFunction
+        if (cryptex) {
+            fingerprintPE.cryptex = true
+        }
     }
 
     /**
      * Notify this layer that DTLS data has been received from the network
      */
-    fun dtlsDataReceived(data: ByteArray, off: Int, len: Int) =
-        dtlsStack.processIncomingProtocolData(data, off, len)
+    fun dtlsDataReceived(data: ByteArray, off: Int, len: Int) = dtlsStack.processIncomingProtocolData(data, off, len)
 
     /**
      * Send out DTLS data
      */
-    fun sendDtlsData(data: ByteArray, off: Int, len: Int) =
-        dtlsStack.sendApplicationData(data, off, len)
+    fun sendDtlsData(data: ByteArray, off: Int, len: Int) = dtlsStack.sendApplicationData(data, off, len)
 
     fun stop() {
         if (running.compareAndSet(true, false)) {
@@ -190,6 +189,7 @@ class DtlsTransport(parentLogger: Logger) {
 
     fun getDebugState(): OrderedJsonObject = stats.toJson().apply {
         put("running", running.get())
+        put("role", dtlsStack.role.toString())
         put("is_connected", isConnected)
     }
 

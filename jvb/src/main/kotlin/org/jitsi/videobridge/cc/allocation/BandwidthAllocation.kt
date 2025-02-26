@@ -27,29 +27,29 @@ class BandwidthAllocation @JvmOverloads constructor(
     val oversending: Boolean = false,
     val idealBps: Long = -1,
     val targetBps: Long = -1,
+    /** Whether any of the requested sources were suspended (no layer at all was selected) due to BWE. */
+    private val suspendedSources: List<String> = emptyList()
 ) {
+    val hasSuspendedSources: Boolean = suspendedSources.isNotEmpty()
     val forwardedEndpoints: Set<String> =
         allocations.filter { it.isForwarded() }.map { it.endpointId }.toSet()
+
+    val forwardedSources: Set<String> =
+        allocations.filter { it.isForwarded() }.mapNotNull { it.mediaSource?.sourceName }.toSet()
 
     /**
      * Whether the two allocations have the same endpoints and same layers.
      */
-    fun isTheSameAs(other: BandwidthAllocation) =
-        allocations.size == other.allocations.size &&
-            oversending == other.oversending &&
-            allocations.all { allocation ->
-                other.allocations.any { otherAllocation ->
-                    allocation.endpointId == otherAllocation.endpointId &&
-                        allocation.mediaSource?.primarySSRC ==
-                        otherAllocation.mediaSource?.primarySSRC &&
-                        allocation.targetLayer?.index == otherAllocation.targetLayer?.index
-                }
+    fun isTheSameAs(other: BandwidthAllocation) = allocations.size == other.allocations.size &&
+        oversending == other.oversending &&
+        allocations.all { allocation ->
+            other.allocations.any { otherAllocation ->
+                allocation.endpointId == otherAllocation.endpointId &&
+                    allocation.mediaSource?.primarySSRC ==
+                    otherAllocation.mediaSource?.primarySSRC &&
+                    allocation.targetLayer?.index == otherAllocation.targetLayer?.index
             }
-
-    /**
-     * Whether this allocation is forwarding a source from an endpoint with this ID.
-     */
-    fun isForwarding(epId: String): Boolean = forwardedEndpoints.contains(epId)
+        }
 
     override fun toString(): String = "oversending=$oversending " + allocations.joinToString()
 
@@ -57,6 +57,16 @@ class BandwidthAllocation @JvmOverloads constructor(
         get() = JSONObject().apply {
             put("idealBps", idealBps)
             put("targetBps", targetBps)
+            put("oversending", oversending)
+            put("has_suspended_sources", hasSuspendedSources)
+            put("suspended_sources", suspendedSources)
+            val allocations = JSONObject().apply {
+                allocations.forEach {
+                    val name = it.mediaSource?.sourceName ?: it.endpointId
+                    put(name, it.debugState)
+                }
+            }
+            put("allocations", allocations)
         }
 }
 
@@ -78,11 +88,23 @@ data class SingleAllocation(
     val idealLayer: RtpLayerDesc? = null
 ) {
     constructor(endpoint: MediaSourceContainer, targetLayer: RtpLayerDesc? = null, idealLayer: RtpLayerDesc? = null) :
-        this(endpoint.id, endpoint.mediaSource, targetLayer, idealLayer)
+        this(
+            endpoint.id,
+            endpoint.mediaSources.firstOrNull(),
+            targetLayer,
+            idealLayer
+        )
     private val targetIndex: Int
         get() = targetLayer?.index ?: -1
     fun isForwarded(): Boolean = targetIndex > -1
 
     override fun toString(): String = "[id=$endpointId target=${targetLayer?.height}/${targetLayer?.frameRate} " +
-        "ideal=${idealLayer?.height}/${idealLayer?.frameRate}"
+        "(${targetLayer?.indexString()}) " +
+        "ideal=${idealLayer?.height}/${idealLayer?.frameRate} (${idealLayer?.indexString()})]"
+
+    val debugState: JSONObject
+        get() = JSONObject().apply {
+            put("target", targetLayer?.debugState())
+            put("ideal", idealLayer?.debugState())
+        }
 }

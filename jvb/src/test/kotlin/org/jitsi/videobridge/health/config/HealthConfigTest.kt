@@ -18,6 +18,8 @@ package org.jitsi.videobridge.health.config
 
 import io.kotest.matchers.shouldBe
 import org.jitsi.ConfigTest
+import org.jitsi.config.withLegacyConfig
+import org.jitsi.config.withNewConfig
 import java.time.Duration
 
 class HealthConfigTest : ConfigTest() {
@@ -27,7 +29,7 @@ class HealthConfigTest : ConfigTest() {
                 withLegacyConfig(legacyConfigWithHealthInterval) {
                     withNewConfig(newConfigWithHealthInterval) {
                         should("use the value from legacy config") {
-                            HealthConfig().interval shouldBe Duration.ofSeconds(1)
+                            HealthConfig.config.interval shouldBe Duration.ofSeconds(1)
                         }
                     }
                 }
@@ -35,7 +37,7 @@ class HealthConfigTest : ConfigTest() {
             context("when only new config defines a value") {
                 withNewConfig(newConfigWithHealthInterval) {
                     should("use the value from the new config") {
-                        HealthConfig().interval shouldBe Duration.ofSeconds(5)
+                        HealthConfig.config.interval shouldBe Duration.ofSeconds(5)
                     }
                 }
             }
